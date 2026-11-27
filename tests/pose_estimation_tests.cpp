@@ -1,6 +1,7 @@
 // SE(3) tests; cv::Affine3d is the oracle for compose, inverse and the rotation part of exp.
 #include "pose_estimation.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <numbers>
 #include <vector>
@@ -70,6 +71,82 @@ int main() {
 	const Sample s = sampleRansacHypothesis(7, 3, 5);
 	checkSmall(s == sampleRansacHypothesis(7, 3, 5) && s[0] != s[1] && s[0] != s[2] && s[1] != s[2]
 	           && s[0] < 5 && s[1] < 5 && s[2] < 5 ? 0 : 1, "sample distinct, deterministic", 0);
+
+	// 3D-2D refinement: 300 world points seen by a camera at T_cw, 2D noise sigma = 0.5 px.
+	const cv::Matx33d K(525, 0, 319.5, 0, 525, 239.5, 0, 0, 1);
+	const cv::Affine3d T_cw = expSE3(cv::Vec6d(0.05, -0.1, 0.2, 0.05, 0.1, -0.02));
+	std::vector<MapObservation> observations;
+	for (int i = 0; i < 300; ++i) {
+		const cv::Point3d P(rng.uniform(-2.0, 2.0), rng.uniform(-1.5, 1.5), rng.uniform(2.0, 6.0));
+		const cv::Vec3d pc = T_cw * cv::Vec3d(P);
+		const cv::Point2d uv = *project({pc[0], pc[1], pc[2]}, K);
+		observations.push_back({P, uv + cv::Point2d(rng.gaussian(0.5), rng.gaussian(0.5)), 1.0});
+	}
+
+	// Jacobian = central differences of the residual under T <- exp(eps e_k) T
+	const auto J = computePoseJacobians(observations, T_cw, K);
+	double jacobianError = 0.0;
+	for (int k = 0; k < 6; ++k) {
+		cv::Vec6d eps = cv::Vec6d::zeros();
+		eps[k] = 1e-6;
+		const auto rp = computeReprojectionResiduals(observations, composePose(expSE3(eps), T_cw), K);
+		const auto rm = computeReprojectionResiduals(observations, composePose(expSE3(-eps), T_cw), K);
+		for (size_t i = 0; i < observations.size(); ++i) {
+			const cv::Point2d numeric = (rp[i] - rm[i]) * (0.5 / eps[k]);
+			jacobianError = std::max({jacobianError, std::abs(numeric.x - J[i](0, k)), std::abs(numeric.y - J[i](1, k))});
+		}
+	}
+	checkSmall(jacobianError * 1e-3, "Jacobian vs finite differences", 0);  // ~1e-6 px absolute
+
+	// LDL^T solve = cv::solve
+	const auto residuals = computeReprojectionResiduals(observations, T_cw, K);
+	const PoseSystem system = accumulatePoseSystem(residuals, J, observations);
+	cv::Vec6d expected;
+	cv::Matx66d damped = system.H;
+	for (int i = 0; i < 6; ++i) damped(i, i) *= 1.5;
+	cv::solve(damped, system.b, expected, cv::DECOMP_CHOLESKY);
+	const auto delta = solvePoseIncrement(system.H, system.b, 0.5);
+	checkSmall(delta ? cv::norm(*delta - expected) / cv::norm(expected) : 1.0, "LDL^T vs cv::solve", 0);
+	checkSmall(solvePoseIncrement(cv::Matx66d::zeros(), system.b).has_value(), "singular -> nullopt", 0);
+
+	// refinePose from a perturbed start converges to the truth within noise
+	const cv::Affine3d start = composePose(expSE3(cv::Vec6d(0.05, 0.03, -0.05, 0.02, -0.03, 0.01)), T_cw);
+	const auto refined = refinePose(observations, start, K);
+	checkSmall(refined ? std::max(0.0, distance(refined->T_cw, T_cw) - 0.01) : 1.0, "refinePose pose", 0);
+	checkSmall(refined ? std::max(0.0, refined->finalRms - 0.8) : 1.0, "refinePose rms ~ 0.71", 0);
+	checkSmall(refined && refined->initialRms > 10 && refined->numInliers > 280 ? 0 : 1, "refinePose rms drop, inliers", 0);
+
+
+	// refinePose must not "improve" by pushing points behind the camera (accept only if numValid is unchanged).
+	// Start 10 cm behind the truth; 10 weak extra points sit 3-6 cm in front of the start camera.
+	// The good points pull the camera forward 10 cm in one step, which would put those 10 points behind it.
+	{
+		const cv::Affine3d back = composePose(expSE3(cv::Vec6d(0, 0, 0.1, 0, 0, 0)), T_cw);  // camera moved -z
+		std::vector<MapObservation> mixed(observations.begin(), observations.begin() + 100);
+		for (int i = 0; i < 10; ++i) {
+			const cv::Vec3d pc(rng.uniform(-0.01, 0.01), rng.uniform(-0.01, 0.01), rng.uniform(0.03, 0.06));
+			const cv::Vec3d P = inversePose(back) * pc;
+			mixed.push_back({{P[0], P[1], P[2]}, *project({pc[0], pc[1], pc[2]}, K), 1e-6});  // weak: do not resist
+		}
+		const auto r = refinePose(mixed, back, K);
+		size_t behind = 0;
+		if (r)
+			for (const auto& e : computeReprojectionResiduals(mixed, r->T_cw, K)) behind += std::isnan(e.x);
+		checkSmall(r ? double(behind) : 1.0, "refinePose keeps every point in front", 0);
+	}
+
+	// buildMapObservations: observed pixel = coords * 1.2^level, not rounded; information = 1.2^(-2 level)
+	{
+		Frame frame;
+		frame.features.push_back({Candidate{0.f, {7, 10}, 4}, {}, 0.f});
+		const std::vector<cv::Point3d> mapPoints{{1, 2, 3}};
+		const auto obs = buildMapObservations(frame, mapPoints, {{0, 0}});
+		const double scale = std::pow(1.2, 4);  // 2.0736: 7 -> 14.5152, rounding would give 15
+		checkSmall(obs.size() == 1 ? cv::norm(obs[0].pixel - cv::Point2d(7 * scale, 10 * scale)) : 1.0,
+		           "map observation pixel unrounded", 4);
+		checkSmall(obs.size() == 1 ? std::abs(obs[0].information - 1 / (scale * scale)) : 1.0,
+		           "map observation information", 4);
+	}
 
 	std::printf("%d failures\n", failures);
 	return failures != 0;

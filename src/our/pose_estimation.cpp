@@ -305,33 +305,174 @@ std::optional<RansacResult> estimatePoseRansac(std::span<const PointPair3D> pair
 
 // ---------------------------------------------------------------- 3D-2D refinement
 
+// (frame idx i -> map idx j): {mapPoints[j], coords * 1.2^level, 1.2^(-2 level)}; sorted by i
 std::vector<MapObservation> buildMapObservations(const Frame& frame,
 	std::span<const cv::Point3d> mapPoints, const orb_matches_t& mapMatches) {
-	throw std::logic_error("TODO: buildMapObservations");
+	std::vector<std::pair<size_t, size_t>> matches(mapMatches.begin(), mapMatches.end());
+	std::ranges::sort(matches);  // unordered_map order is unspecified; fixed order keeps sums reproducible
+	std::vector<MapObservation> observations;
+	observations.reserve(matches.size());
+	for (const auto& [i, j] : matches) {
+		if (i >= frame.features.size() || j >= mapPoints.size()) continue;
+		const Candidate& c = frame.features[i].candidate;
+		const double scale = std::pow(DEFAULT_SCALE_FACTOR, c.level);
+		const cv::Point2d pixel(c.coords.first * scale, c.coords.second * scale);  // unrounded, unlike the depth lookup
+		observations.push_back({mapPoints[j], pixel, 1.0 / (scale * scale)});
+	}
+	return observations;
 }
 
+// pc = R P + t
+static cv::Vec3d toCamera(const cv::Point3d& pointWorld, const cv::Matx33d& R, const cv::Vec3d& t) {
+	return R * cv::Vec3d(pointWorld) + t;
+}
+
+// r_i = project(T_cw P_i) - uv_i; NaN if the point is behind the camera
 std::vector<cv::Point2d> computeReprojectionResiduals(std::span<const MapObservation> observations,
 	const cv::Affine3d& T_cw, const cv::Matx33d& K) {
-	throw std::logic_error("TODO: computeReprojectionResiduals");
+	constexpr double nan = std::numeric_limits<double>::quiet_NaN();
+	const cv::Matx33d R = T_cw.rotation();
+	const cv::Vec3d t = T_cw.translation();
+	std::vector<cv::Point2d> residuals;
+	residuals.reserve(observations.size());
+	for (const auto& o : observations) {
+		const cv::Vec3d pc = toCamera(o.pointWorld, R, t);
+		const auto uv = project({pc[0], pc[1], pc[2]}, K);
+		residuals.push_back(uv ? *uv - o.pixel : cv::Point2d(nan, nan));
+	}
+	return residuals;
 }
 
+// J_i = d project/d pc * [I | -[pc]x], pc = T_cw P_i
 std::vector<Jacobian26> computePoseJacobians(std::span<const MapObservation> observations,
 	const cv::Affine3d& T_cw, const cv::Matx33d& K) {
-	throw std::logic_error("TODO: computePoseJacobians");
+	const double fx = K(0, 0), s = K(0, 1), fy = K(1, 1);
+	const cv::Matx33d R = T_cw.rotation();
+	const cv::Vec3d t = T_cw.translation();
+	std::vector<Jacobian26> jacobians;
+	jacobians.reserve(observations.size());
+	for (const auto& o : observations) {
+		const cv::Vec3d pc = toCamera(o.pointWorld, R, t);
+		const double x = pc[0], y = pc[1], iz = 1.0 / pc[2];
+		const cv::Matx23d dpi(fx * iz, s * iz, -(fx * x + s * y) * iz * iz,
+		                      0,       fy * iz, -fy * y * iz * iz);
+		const cv::Matx33d minusSkew = -skew(pc);
+		cv::Matx<double, 3, 6> dpc;  // [I | -[pc]x]
+		for (int r = 0; r < 3; ++r) {
+			dpc(r, r) = 1.0;
+			for (int c = 0; c < 3; ++c) dpc(r, 3 + c) = minusSkew(r, c);
+		}
+		jacobians.push_back(dpi * dpc);
+	}
+	return jacobians;
 }
 
+// Huber cost of e: e^2 / 2 if e <= delta, else delta (e - delta / 2)
+static double huberCost(double e) {
+	return e <= HUBER_DELTA ? 0.5 * e * e : HUBER_DELTA * (e - 0.5 * HUBER_DELTA);
+}
+
+// H = sum w info J^T J, b = -sum w info J^T r; e = sqrt(info) |r|, w = min(1, HUBER_DELTA / e); skips NaN r
 PoseSystem accumulatePoseSystem(std::span<const cv::Point2d> residuals,
 	std::span<const Jacobian26> jacobians, std::span<const MapObservation> observations) {
-	throw std::logic_error("TODO: accumulatePoseSystem");
+	PoseSystem system{cv::Matx66d::zeros(), cv::Vec6d::zeros()};
+	for (size_t i = 0; i < residuals.size(); ++i) {
+		const cv::Vec2d r(residuals[i].x, residuals[i].y);
+		if (std::isnan(r[0])) continue;
+		const double info = observations[i].information;
+		const double e = std::sqrt(info) * cv::norm(r);
+		const double wInfo = (e <= HUBER_DELTA ? 1.0 : HUBER_DELTA / e) * info;
+		const Jacobian26& J = jacobians[i];
+		system.H += wInfo * (J.t() * J);
+		system.b -= wInfo * (J.t() * r);
+		system.cost += huberCost(e);
+		++system.numValid;
+	}
+	return system;
 }
 
+// (H + lambda diag H) delta = b by LDL^T; nullopt if a pivot is ~0
 std::optional<cv::Vec6d> solvePoseIncrement(const cv::Matx66d& H, const cv::Vec6d& b, double lambda) {
-	throw std::logic_error("TODO: solvePoseIncrement");
+	cv::Matx66d A = H;
+	double maxDiag = 0.0;
+	for (int i = 0; i < 6; ++i) {
+		A(i, i) += lambda * H(i, i);
+		maxDiag = std::max(maxDiag, std::abs(A(i, i)));
+	}
+
+	cv::Matx66d L = cv::Matx66d::eye();
+	cv::Vec6d D;
+	for (int j = 0; j < 6; ++j) {  // D_j = A_jj - sum L_jk^2 D_k,  L_ij = (A_ij - sum L_ik L_jk D_k) / D_j
+		D[j] = A(j, j);
+		for (int k = 0; k < j; ++k) D[j] -= L(j, k) * L(j, k) * D[k];
+		if (D[j] <= 1e-12 * maxDiag) return std::nullopt;  // also rejects non-positive-definite H
+		for (int i = j + 1; i < 6; ++i) {
+			L(i, j) = A(i, j);
+			for (int k = 0; k < j; ++k) L(i, j) -= L(i, k) * L(j, k) * D[k];
+			L(i, j) /= D[j];
+		}
+	}
+
+	cv::Vec6d x = b;
+	for (int i = 0; i < 6; ++i)       // L y = b
+		for (int k = 0; k < i; ++k) x[i] -= L(i, k) * x[k];
+	for (int i = 0; i < 6; ++i) x[i] /= D[i];
+	for (int i = 5; i >= 0; --i)      // L^T x = D^-1 y
+		for (int k = i + 1; k < 6; ++k) x[i] -= L(k, i) * x[k];
+	return x;
 }
 
+static PoseSystem systemAt(std::span<const MapObservation> observations, const cv::Affine3d& T_cw, const cv::Matx33d& K) {
+	return accumulatePoseSystem(computeReprojectionResiduals(observations, T_cw, K),
+	                            computePoseJacobians(observations, T_cw, K), observations);
+}
+
+// rms = sqrt(mean |r|^2) over valid r;  inliers: sqrt(info) |r| <= HUBER_DELTA
+static std::pair<double, size_t> rmsAndInliers(std::span<const MapObservation> observations,
+	const cv::Affine3d& T_cw, const cv::Matx33d& K) {
+	const auto residuals = computeReprojectionResiduals(observations, T_cw, K);
+	double sum = 0.0;
+	size_t valid = 0, inliers = 0;
+	for (size_t i = 0; i < residuals.size(); ++i) {
+		const double r2 = residuals[i].dot(residuals[i]);
+		if (std::isnan(r2)) continue;
+		sum += r2;
+		++valid;
+		inliers += observations[i].information * r2 <= HUBER_DELTA * HUBER_DELTA;
+	}
+	return {valid ? std::sqrt(sum / valid) : 0.0, inliers};
+}
+
+// repeat: residuals, jacobians, H b, solve, T <- exp(delta) T; on cost increase reject and raise lambda
 std::optional<RefineResult> refinePose(std::span<const MapObservation> observations,
 	const cv::Affine3d& initialT_cw, const cv::Matx33d& K, int maxIterations) {
-	throw std::logic_error("TODO: refinePose");
+	cv::Affine3d T = initialT_cw;
+	PoseSystem system = systemAt(observations, T, K);
+	if (system.numValid < 3) return std::nullopt;  // 6 dof need at least 3 points
+
+	double lambda = 1e-4;
+	for (int it = 0; it < maxIterations; ++it) {
+		const auto delta = solvePoseIncrement(system.H, system.b, lambda);
+		if (!delta) {
+			if (it == 0) return std::nullopt;  // degenerate from the start; later, keep the progress
+			lambda *= 10.0;
+			continue;
+		}
+		const cv::Affine3d candidate = composePose(expSE3(*delta), T);
+		const PoseSystem next = systemAt(observations, candidate, K);
+		if (next.numValid == system.numValid && next.cost < system.cost) {  // losing points must not count as lower cost
+			T = candidate;
+			system = next;
+			lambda /= 10.0;
+		} else {
+			lambda *= 10.0;
+		}
+		if (cv::norm(*delta) < 1e-10) break;
+	}
+
+	const auto [initialRms, ignored] = rmsAndInliers(observations, initialT_cw, K);
+	const auto [finalRms, numInliers] = rmsAndInliers(observations, T, K);
+	return RefineResult{T, initialRms, finalRms, numInliers};
 }
 
 // ---------------------------------------------------------------- tracking
