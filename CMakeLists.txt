@@ -63,7 +63,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE options_parser)
 
 
 
-find_package(OpenCV REQUIRED COMPONENTS core)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc)
 
 #! Implementation variant, chosen at configure time:
 #  Only sets the DEFAULT slam::kMode; every variant can still be called explicitly.
@@ -71,48 +71,13 @@ find_package(OpenCV REQUIRED COMPONENTS core)
 set(SLAM_MODE SEQUENTIAL CACHE STRING "Default SLAM implementation variant")
 set_property(CACHE SLAM_MODE PROPERTY STRINGS SEQUENTIAL SIMD PARALLEL)
 
-add_library(slam_ransac
-		src/geometry.cpp
-		src/camera.cpp
-		src/ransac.cpp
-		src/pose_refine.cpp
-		src/tracking.cpp
-		src/kernels.cpp
-)
-
-#! PUBLIC so every target linking slam_ransac is built with the same mode
-target_compile_definitions(slam_ransac PUBLIC SLAM_MODE=${SLAM_MODE})
-
-target_include_directories(slam_ransac
-		PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-
-# Person 1's header (ORB_Descriptor) is needed only inside the .cpp files.
-target_include_directories(slam_ransac
-		PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/our
-)
-
-find_package(Threads REQUIRED)
-target_link_libraries(slam_ransac
-		PUBLIC opencv_core Threads::Threads
-)
-
-#! Person 2 tests (plain checks, work in Release too) and benchmark
+#! Person 2 tests (plain checks, work in Release too)
 enable_testing()
-add_executable(slam_pose_estimation_core_tests tests/pose_estimation_core_tests.cpp)
-target_link_libraries(slam_pose_estimation_core_tests PRIVATE slam_ransac)
-add_test(NAME pose_estimation_core_tests COMMAND slam_pose_estimation_core_tests)
-
-add_executable(slam_pose_estimation_tests tests/pose_estimation_tests.cpp src/our/pose_estimation.cpp)
-target_link_libraries(slam_pose_estimation_tests PRIVATE opencv_core)
+add_executable(slam_pose_estimation_tests tests/pose_estimation_tests.cpp src/our/pose_estimation.cpp src/our/feature_extractor.cpp)
+target_link_libraries(slam_pose_estimation_tests PRIVATE opencv_core opencv_imgproc)
 target_include_directories(slam_pose_estimation_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/our)
 add_test(NAME pose_estimation_tests COMMAND slam_pose_estimation_tests)
 
-add_executable(slam_pose_estimation_bench bench/pose_estimation_bench.cpp
-		src/our/pose_estimation.cpp
-		src/our/pose_estimation.hpp)
-target_link_libraries(slam_pose_estimation_bench PRIVATE slam_ransac)
-target_include_directories(slam_pose_estimation_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 #! Add external packages
 # options_parser requires boost::program_options library
@@ -129,7 +94,7 @@ INSTALL(PROGRAMS
 		DESTINATION bin)
 
 # Define ALL_TARGETS variable to use in PVS and Sanitizers
-set(ALL_TARGETS ${PROJECT_NAME} slam_ransac slam_pose_estimation_core_tests slam_pose_estimation_tests slam_pose_estimation_bench)
+set(ALL_TARGETS ${PROJECT_NAME} slam_pose_estimation_tests)
 
 # Include CMake setup
 include(cmake/main-config.cmake)

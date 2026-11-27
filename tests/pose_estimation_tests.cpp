@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <numbers>
+#include <vector>
 
 static int failures = 0;
 
@@ -46,6 +47,29 @@ int main() {
 		const cv::Affine3d T(R, cv::Vec3d(1, 2, 3));
 		checkSmall(distance(expSE3(logSE3(T)), T), "exp(log(T)) = T", pi);
 	}
+
+	// Horn + RANSAC on a random scene: 200 pairs, 30% shuffled outliers, cv::Affine3d as the truth.
+	const cv::Affine3d T_true = expSE3(cv::Vec6d(0.1, -0.2, 0.05, 0.2, -0.1, 0.3));
+	std::vector<PointPair3D> pairs;
+	for (size_t i = 0; i < 200; ++i) {
+		const cv::Point3d a(rng.uniform(-1.0, 1.0), rng.uniform(-1.0, 1.0), rng.uniform(1.0, 4.0));
+		const cv::Vec3d b = T_true * cv::Vec3d(a);
+		pairs.push_back({a, {b[0], b[1], b[2]}, i, i});
+	}
+	const auto horn = estimateRigidTransform(pairs);
+	checkSmall(horn ? distance(*horn, T_true) : 1.0, "Horn exact", 0);
+	for (size_t i = 0; i < 60; ++i) pairs[i].b.x += 0.5;  // outliers: 50 cm off
+	const auto ransac = estimatePoseRansac(pairs);
+	checkSmall(ransac ? distance(ransac->T_ba, T_true) : 1.0, "RANSAC pose", 0);
+	checkSmall(ransac ? std::abs(double(ransac->numInliers) - 140) : 1.0, "RANSAC inliers", 0);
+
+	const std::vector<PointPair3D> line{{{0, 0, 1}, {0, 0, 1}}, {{1, 0, 1}, {1, 0, 1}}, {{2, 0, 1}, {2, 0, 1}}};
+	checkSmall(estimateRigidTransform(line).has_value(), "collinear -> nullopt", 0);
+	checkSmall(isDegenerateSample(std::span<const PointPair3D, 3>(line.data(), 3)) ? 0 : 1, "collinear degenerate", 0);
+
+	const Sample s = sampleRansacHypothesis(7, 3, 5);
+	checkSmall(s == sampleRansacHypothesis(7, 3, 5) && s[0] != s[1] && s[0] != s[2] && s[1] != s[2]
+	           && s[0] < 5 && s[1] < 5 && s[2] < 5 ? 0 : 1, "sample distinct, deterministic", 0);
 
 	std::printf("%d failures\n", failures);
 	return failures != 0;

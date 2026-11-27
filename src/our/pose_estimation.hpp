@@ -124,11 +124,11 @@ cv::Vec6d logSE3(const cv::Affine3d& T);
 
 // d = raw / DEPTH_SCALE; nullopt if outside the image, raw == 0, or d outside [MIN_DEPTH, MAX_DEPTH]
 // cv: cv::rgbd::rescaleDepth (contrib; whole image, marks invalid as NaN)
-std::optional<double> readValidDepth(const Frame& frame, cv::Point pixel);
+std::optional<double> readValidDepth(const Frame& frame, const cv::Point& pixel);
 
 // X = (u - cx) Z / fx, Y = (v - cy) Z / fy, Z = depth
 // cv: cv::rgbd::depthTo3dSparse (contrib); cv::undistortPoints gives (X/Z, Y/Z) only
-cv::Point3d backProject(cv::Point2d pixel, double depth, const cv::Matx33d& K);
+cv::Point3d backProject(const cv::Point2d& pixel, double depth, const cv::Matx33d& K);
 
 // u = fx X/Z + cx, v = fy Y/Z + cy; nullopt if Z <= 0
 // cv: cv::projectPoints with rvec = tvec = 0 (it does not check Z > 0)
@@ -151,7 +151,7 @@ bool isDegenerateSample(std::span<const PointPair3D, 3> sample);
 
 // Horn: N (4x4) from S = sum a' b'^T, q = eigenvector of the largest eigenvalue, t = cb - R ca
 // nullopt if fewer than 3 pairs or the rotation is ambiguous
-// cv: cv::estimateAffine3D(src, dst, nullptr, true) (Umeyama/SVD, scale = 1); cv::eigen for N
+// cv: cv::estimateAffine3D(src, dst, nullptr, true) (Umeyama/SVD, scale = 1); uses cv::eigen for N
 std::optional<cv::Affine3d> estimateRigidTransform(std::span<const PointPair3D> pairs);
 
 // 3 distinct indices < numPairs (numPairs >= 3), depending only on (seed, iteration)
