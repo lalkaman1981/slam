@@ -20,8 +20,8 @@ PipelineConfig checkedConfig(const PipelineConfig &config) {
         config.maxFeatures < static_cast<int>(MIN_INLIERS) || config.mapping.minInitialPoints < 3 ||
         !std::isfinite(c.bf) || c.bf <= 0)
         throw std::invalid_argument("Invalid camera or pipeline configuration");
-    if (config.mapping.levels != 8 || std::abs(config.mapping.scaleFactor - 1.2) > 1e-12)
-        throw std::invalid_argument("Upstream features use eight pyramid levels with scale 1.2");
+    if (config.mapping.levels != 8 || std::abs(config.mapping.scaleFactor - 1.3) > 1e-12)
+        throw std::invalid_argument("Upstream features use eight pyramid levels with scale 1.3");
     return config;
 }
 } // namespace
@@ -69,7 +69,7 @@ TrackingResult RgbdPipeline::associateMap(const ::Frame &frame, const Pose &init
         tracking.visibleLandmarkIds.push_back(view.landmarkId);
     }
     const auto projectedMatches =
-        ::match_frame2map(frame.features, candidates, 15.0f, 1, 1.2, 80, 0.8, false);
+        ::match_frame2map(frame.features, candidates, 15.0f, 1, 1.3, 80, 0.8, false);
     // Carry verified frame-to-frame associations forward. Rematching these points
     // would unnecessarily lose observations to the projection matcher's ratio test.
     orb_matches_t matches;
@@ -99,7 +99,7 @@ TrackingResult RgbdPipeline::associateMap(const ::Frame &frame, const Pose &init
     const auto T = toTrackingPose(tracking.T_cw);
     for (const auto &[feature, point] : matches) {
         const auto &f = frame.features.at(feature);
-        const double scale = std::pow(1.2, f.candidate.level);
+        const double scale = std::pow(1.3, f.candidate.level);
         const cv::Point2d pixel(f.candidate.coords.first * scale, f.candidate.coords.second * scale);
         const auto pc = ::transformPoints(std::span<const cv::Point3d>(&points.at(point), 1), T).front();
         const auto projected = ::project(pc, K);

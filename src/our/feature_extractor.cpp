@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <stdexcept>
 #include <opencv2/imgproc.hpp>
@@ -59,18 +60,18 @@ pyramid_t build_pyramid(const cv::Mat& gray,
     return pyramid;
 }
 
-static bool is_fast_corner(const cv::Mat& img, int x, int y) {
+static bool is_fast_corner(const cv::Mat& img, int x, int y, int threshold, int arc_length) {
     const int v = img.at<uchar>(y, x);
     int state[16];
     for (int k = 0; k < 16; ++k) {
         const int p = img.at<uchar>(y + circle[k][1], x + circle[k][0]);
-        state[k] = p > v + FAST_CORNER_THRESHOLD ? 1 : (p < v - FAST_CORNER_THRESHOLD ? -1 : 0);
+        state[k] = p > v + threshold ? 1 : (p < v - threshold ? -1 : 0);
     }
     for (int sign : {1, -1}) {
         int run = 0;
-        for (int k = 0; k < 16 + FAST_ARC_LENGTH - 1; ++k) {
+        for (int k = 0; k < 16 + arc_length - 1; ++k) {
             if (state[k % 16] == sign) {
-                if (++run >= FAST_ARC_LENGTH) return true;
+                if (++run >= arc_length) return true;
             } else {
                 run = 0;
             }
@@ -79,7 +80,7 @@ static bool is_fast_corner(const cv::Mat& img, int x, int y) {
     return false;
 }
 
-pyramid_corners_t detect_fast_corners(const pyramid_t& pyramid) {
+pyramid_corners_t detect_fast_corners(const pyramid_t& pyramid, int threshold, int arc_length) {
     pyramid_corners_t pyramid_candidates;
     pyramid_candidates.reserve(pyramid.size());
 
@@ -89,7 +90,7 @@ pyramid_corners_t detect_fast_corners(const pyramid_t& pyramid) {
 
         for (int y = PATCH_BORDER; y < level.rows - PATCH_BORDER; ++y) {
             for (int x = PATCH_BORDER; x < level.cols - PATCH_BORDER; ++x) {
-                if (is_fast_corner(level, x, y)) level_vec.emplace_back(x, y);
+                if (is_fast_corner(level, x, y, threshold, arc_length)) level_vec.emplace_back(x, y);
             }
         }
 
@@ -136,12 +137,14 @@ candidates_scores_t evaluate_level(
 
 level_scores_t get_corners_scores(
     const pyramid_corners_t& pyramid_candidates,
-    const pyramid_t& pyramid) {
+    const pyramid_t& pyramid,
+    int radius,
+    float k) {
 
     level_scores_t pyramid_scores;
     pyramid_scores.reserve(pyramid.size());
     for (size_t i = 0; i < pyramid.size(); ++i) {
-        pyramid_scores.push_back(evaluate_level(pyramid_candidates[i], pyramid[i]));
+        pyramid_scores.push_back(evaluate_level(pyramid_candidates[i], pyramid[i], radius, k));
     }
     return pyramid_scores;
 }
@@ -186,7 +189,9 @@ std::vector<Candidate> create_valid_candidates(
     const pyramid_corners_t& pyramid_candidates,
     const level_scores_t& pyramid_scores,
     int top_k,
-    float scale) {
+    float scale,
+    int grid_side,
+    int max_in_cell) {
     const int level_num = static_cast<int>(pyramid_scores.size());
 
     std::vector<Candidate> candidates;
@@ -209,7 +214,7 @@ std::vector<Candidate> create_valid_candidates(
         }
     }
 
-    return select_keypoints_by_grid(candidates, 10, 3, scale);
+    return select_keypoints_by_grid(candidates, grid_side, max_in_cell, scale);
 }
 
 float compute_orientation(
@@ -246,8 +251,10 @@ std::vector<float> get_orientations(
     return orientations;
 }
 
-static const std::vector<std::array<int, 4>>& get_brief_pattern(int kernel_size) {
+const std::vector<std::array<int, 4>>& get_brief_pattern(int kernel_size) {
     static std::map<int, std::vector<std::array<int, 4>>> cache;
+    static std::mutex cache_mutex;  // the pattern is requested from several threads
+    std::lock_guard<std::mutex> lock(cache_mutex);
     auto it = cache.find(kernel_size);
     if (it != cache.end()) return it->second;
 
@@ -326,23 +333,31 @@ std::vector<ORB_Descriptor> create_orb_descs(
     return orb_descriptors;
 }
 
-std::vector<ORB_Descriptor> extractFeatures(const cv::Mat& gray, int top_k) {
+std::vector<ORB_Descriptor> extractFeatures(const cv::Mat& gray, const OrbParams& params) {
     if (gray.empty() || gray.type() != CV_8UC1)
         throw std::invalid_argument("gray must be a non-empty CV_8UC1 image");
 
-    pyramid_t pyramid = build_pyramid(gray);
-    pyramid_corners_t pyramid_candidates = detect_fast_corners(pyramid);
-    level_scores_t pyramid_scores = get_corners_scores(pyramid_candidates, pyramid);
-    std::vector<Candidate> candidates = create_valid_candidates(pyramid_candidates, pyramid_scores, top_k);
+    pyramid_t pyramid = build_pyramid(gray, params.levels, params.scale);
+    pyramid_corners_t pyramid_candidates = detect_fast_corners(pyramid, params.fast_threshold, params.fast_arc);
+    level_scores_t pyramid_scores = get_corners_scores(pyramid_candidates, pyramid, params.harris_radius, params.harris_k);
+    std::vector<Candidate> candidates = create_valid_candidates(
+        pyramid_candidates, pyramid_scores, params.top_k, static_cast<float>(params.scale),
+        params.grid_side, params.max_in_cell);
     std::vector<float> orientations = get_orientations(pyramid, candidates);
 
     pyramid_t smoothed(pyramid.size());
     for (size_t i = 0; i < pyramid.size(); ++i) {
-        cv::GaussianBlur(pyramid[i], smoothed[i], cv::Size(7, 7), 2);
+        cv::GaussianBlur(pyramid[i], smoothed[i], cv::Size(params.blur_ksize, params.blur_ksize), params.blur_sigma);
     }
     std::vector<brief_desc_t> descriptors = get_descriptors(smoothed, candidates);
 
     return create_orb_descs(candidates, descriptors, orientations);
+}
+
+std::vector<ORB_Descriptor> extractFeatures(const cv::Mat& gray, int top_k) {
+    OrbParams params;
+    params.top_k = top_k;
+    return extractFeatures(gray, params);
 }
 
 int hamming_distance(const brief_desc_t& desc1, const brief_desc_t& desc2) {
@@ -362,7 +377,9 @@ bool filter_descriptor_matches(
 
 std::optional<size_t> find_two_nearest(
     const ORB_Descriptor& query,
-    const std::vector<ORB_Descriptor>& candidates) {
+    const std::vector<ORB_Descriptor>& candidates,
+    int dist_thrs,
+    double alpha) {
 
     int dist1 = INT_MAX, dist2 = INT_MAX;
     size_t idx1 = 0;
@@ -379,17 +396,19 @@ std::optional<size_t> find_two_nearest(
     }
 
     if (dist2 == INT_MAX) return std::nullopt;
-    if (!filter_descriptor_matches(dist1, dist2)) return std::nullopt;
+    if (!filter_descriptor_matches(dist1, dist2, dist_thrs, alpha)) return std::nullopt;
     return idx1;
 }
 
 orb_matches_t get_matches(
     const std::vector<ORB_Descriptor>& orb_descriptors_query,
-    const std::vector<ORB_Descriptor>& orb_descriptors_key) {
+    const std::vector<ORB_Descriptor>& orb_descriptors_key,
+    int dist_thrs,
+    double alpha) {
     orb_matches_t orb_matches;
     orb_matches.reserve(orb_descriptors_query.size());
     for (size_t q = 0; q < orb_descriptors_query.size(); ++q) {
-        if (auto best = find_two_nearest(orb_descriptors_query[q], orb_descriptors_key)) {
+        if (auto best = find_two_nearest(orb_descriptors_query[q], orb_descriptors_key, dist_thrs, alpha)) {
             orb_matches.emplace(q, *best);
         }
     }
@@ -468,14 +487,27 @@ orb_matches_t filter_matches_by_angle(
 orb_matches_t match_frames(
     const std::vector<ORB_Descriptor>& features1,
     const std::vector<ORB_Descriptor>& features2,
-    bool angle_check) {
+    const MatchParams& params) {
 
-    orb_matches_t matches12 = get_matches(features1, features2);
-    orb_matches_t matches21 = get_matches(features2, features1);
+    orb_matches_t matches12 = get_matches(features1, features2, params.dist_thrs, params.alpha);
+    orb_matches_t matches21 = get_matches(features2, features1, params.dist_thrs, params.alpha);
 
     orb_matches_t mutual = mutual_check(matches12, matches21);
-    if (angle_check) mutual = filter_matches_by_angle(mutual, features1, features2);
+    if (params.angle_check) {
+        mutual = filter_matches_by_angle(mutual, features1, features2,
+                                         params.angle_bins, params.angle_top_bins, params.angle_min_ratio);
+    }
     return mutual;
+}
+
+orb_matches_t match_frames(
+    const std::vector<ORB_Descriptor>& features1,
+    const std::vector<ORB_Descriptor>& features2,
+    bool angle_check) {
+
+    MatchParams params;
+    params.angle_check = angle_check;
+    return match_frames(features1, features2, params);
 }
 
 orb_matches_t match_frames(

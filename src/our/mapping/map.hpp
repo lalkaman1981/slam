@@ -14,8 +14,8 @@
 namespace slam {
 
 struct MapConfig {
-    // ORB scale pyramid (Sec. III-A, 8 levels, factor 1.2).
-    double scaleFactor = 1.2;
+    // ORB scale pyramid (Sec. III-A, 8 levels, factor 1.3).
+    double scaleFactor = 1.3;
     int levels = 8;
 
     // New keyframe decision (Sec. V-E).

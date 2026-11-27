@@ -4,7 +4,7 @@
 #include <cmath>
 #include <limits>
 
-#define DEFAULT_SCALE_FACTOR 1.2
+#define DEFAULT_SCALE_FACTOR 1.3
 
 // ---------------------------------------------------------------- SE(3), shared with person 3
 
@@ -144,7 +144,7 @@ std::vector<cv::Point3d> transformPoints(std::span<const cv::Point3d> points, co
 
 // ---------------------------------------------------------------- 3D-3D pose
 
-// level-0 pixel = round(coords * 1.2^level)
+// level-0 pixel = round(coords * 1.3^level)
 static cv::Point levelZeroPixel(const Candidate& c, double scale_factor=DEFAULT_SCALE_FACTOR) {
 	const auto [x, y] = scale_coords(c.coords, std::pow(scale_factor, c.level));
 	return {x, y};
@@ -304,7 +304,7 @@ std::optional<RansacResult> estimatePoseRansac(std::span<const PointPair3D> pair
 
 // ---------------------------------------------------------------- 3D-2D refinement
 
-// (frame idx i -> map idx j): {mapPoints[j], coords * 1.2^level, 1.2^(-2 level)}; sorted by i
+// (frame idx i -> map idx j): {mapPoints[j], coords * 1.3^level, 1.3^(-2 level)}; sorted by i
 std::vector<MapObservation> buildMapObservations(const Frame& frame,
 	std::span<const cv::Point3d> mapPoints, const orb_matches_t& mapMatches) {
 	std::vector<std::pair<size_t, size_t>> matches(mapMatches.begin(), mapMatches.end());

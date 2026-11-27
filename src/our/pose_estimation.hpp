@@ -45,7 +45,7 @@ struct PointPair3D {
 struct MapObservation {
 	cv::Point3d pointWorld;
 	cv::Point2d pixel;                     // level 0
-	double information=1.0;                // 1 / sigma^2 = 1.2^(-2 level)
+	double information=1.0;                // 1 / sigma^2 = 1.3^(-2 level)
 };
 
 using Sample = std::array<size_t, 3>;       // indices into the pairs
@@ -140,7 +140,7 @@ std::vector<cv::Point3d> transformPoints(std::span<const cv::Point3d> points, co
 
 // ---------------------------------------------------------------- 3D-3D pose
 
-// level-0 pixel = coords * 1.2^level -> round -> depth -> back-project; drops pairs without depth; sort by idxA
+// level-0 pixel = coords * 1.3^level -> round -> depth -> back-project; drops pairs without depth; sort by idxA
 // cv: cv::rgbd::depthTo3dSparse on both frames + filtering by hand; matches = std::vector<cv::DMatch>
 std::vector<PointPair3D> build3DCorrespondences(const Frame& a, const Frame& b,
 	const orb_matches_t& matches, const cv::Matx33d& K);

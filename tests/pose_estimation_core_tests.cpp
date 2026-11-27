@@ -501,7 +501,7 @@ static void testEquivalence() {
         auto obs = makeObservations(rng, T, n, 1.0);
         std::uniform_real_distribution<double> U(0.0, 1.0);
         for (int i = 0; i < n; i += 7) obs[i].pixel = {U(rng) * 640, U(rng) * 480};
-        for (int i = 0; i < n; i += 3) obs[i].information = 1.0 / 1.44;
+        for (int i = 0; i < n; i += 3) obs[i].information = 1.0 / 1.69;
         if (n > 10) obs[3].pointWorld = inversePose(T) * Vec3{0.1, 0.1, -1.0};  // behind camera
         const ObservationsSoA soa = toSoA(obs);
         const Pose P = composePose(expSE3({0.01, 0.0, -0.01, 0.0, 0.01, 0.0}), T);

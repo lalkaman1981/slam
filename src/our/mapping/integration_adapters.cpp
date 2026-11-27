@@ -27,7 +27,7 @@ std::vector<ORB_Descriptor> toTrackingFeatures(const Frame &frame) {
     features.reserve(frame.keypoints.size());
     for (std::size_t i = 0; i < frame.keypoints.size(); ++i) {
         const Keypoint &point = frame.keypoints[i];
-        const double scale = std::pow(1.2, point.octave);
+        const double scale = std::pow(1.3, point.octave);
         Candidate candidate{
             point.response,
             {static_cast<int>(std::lround(point.u / scale)), static_cast<int>(std::lround(point.v / scale))},
@@ -51,7 +51,7 @@ Frame toMappingFrame(const ::Frame &frame, int id, double timestamp, const Camer
     for (const ORB_Descriptor &feature : frame.features) {
         // Depth is sampled at rounded pixels; bundle adjustment retains the subpixel
         // location, matching person 2's buildMapObservations.
-        const double scale = std::pow(1.2, feature.candidate.level);
+        const double scale = std::pow(1.3, feature.candidate.level);
         const auto [u, v] = ::scale_coords(feature.candidate.coords, scale);
         result.keypoints.push_back(
             {static_cast<float>(feature.candidate.coords.first * scale),

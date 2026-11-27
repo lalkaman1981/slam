@@ -135,13 +135,13 @@ int main() {
 		checkSmall(r ? double(behind) : 1.0, "refinePose keeps every point in front", 0);
 	}
 
-	// buildMapObservations: observed pixel = coords * 1.2^level, not rounded; information = 1.2^(-2 level)
+	// buildMapObservations: observed pixel = coords * 1.3^level, not rounded; information = 1.3^(-2 level)
 	{
 		Frame frame;
 		frame.features.push_back({Candidate{0.f, {7, 10}, 4}, {}, 0.f});
 		const std::vector<cv::Point3d> mapPoints{{1, 2, 3}};
 		const auto obs = buildMapObservations(frame, mapPoints, {{0, 0}});
-		const double scale = std::pow(1.2, 4);  // 2.0736: 7 -> 14.5152, rounding would give 15
+		const double scale = std::pow(1.3, 4);  // 2.8561: 10 -> 28.561, rounding would give 29
 		checkSmall(obs.size() == 1 ? cv::norm(obs[0].pixel - cv::Point2d(7 * scale, 10 * scale)) : 1.0,
 		           "map observation pixel unrounded", 4);
 		checkSmall(obs.size() == 1 ? std::abs(obs[0].information - 1 / (scale * scale)) : 1.0,

@@ -34,12 +34,13 @@ void featureConversion() {
     const brief_desc_t bits{0x0123456789abcdefLL, -1, std::numeric_limits<long long>::min(), 42};
     input.features.push_back({{12.0f, {123, 77}, 3}, bits, static_cast<float>(std::numbers::pi / 3.0)});
     input.features.push_back({{1.0f, {42, 42}, 0}, bits, 0.0f});
-    const auto [u, v] = ::scale_coords({123, 77}, std::pow(1.2, 3));
+    const auto [u, v] = ::scale_coords({123, 77}, std::pow(1.3, 3));
     input.depth.at<std::uint16_t>(v, u) = 12500;
     const slam::Frame frame = slam::toMappingFrame(input, 7, 1.25, camera);
     check(frame.id == 7 && frame.timestamp == 1.25, "frame identity");
-    close(frame.keypoints[0].u, 123 * std::pow(1.2, 3), 1e-5, "level-0 x");
-    close(frame.keypoints[0].v, 77 * std::pow(1.2, 3), 1e-5, "level-0 y");
+    // keypoints are stored as float, so compare with the float-rounded expectation
+    close(frame.keypoints[0].u, static_cast<float>(123 * std::pow(1.3, 3)), 1e-5, "level-0 x");
+    close(frame.keypoints[0].v, static_cast<float>(77 * std::pow(1.3, 3)), 1e-5, "level-0 y");
     close(frame.keypoints[0].angle, 60.0, 1e-5, "radians to degrees");
     close(frame.depths[0], 2.5, 1e-6, "depth conversion");
     check(frame.depths[1] == 0.0f, "invalid depth retained as zero");
