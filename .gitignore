@@ -482,3 +482,6 @@ MigrationBackup/
 
 # Ionide (cross platform F# VS Code tools) working folder
 .ionide/
+
+rgbd_dataset_freiburg2_pioneer_360*
+output/
