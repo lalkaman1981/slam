@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <stdexcept>
 
 #define DEFAULT_SCALE_FACTOR 1.2
 
@@ -477,18 +476,46 @@ std::optional<RefineResult> refinePose(std::span<const MapObservation> observati
 
 // ---------------------------------------------------------------- tracking
 
+// inlier pairs -> (idxA -> idxB)
+static orb_matches_t inlierMatches(std::span<const PointPair3D> pairs, const InlierMask& mask) {
+	orb_matches_t matches;
+	for (size_t i = 0; i < pairs.size(); ++i)
+		if (mask[i]) matches.emplace(pairs[i].idxA, pairs[i].idxB);
+	return matches;
+}
+
+// RANSAC T_cr -> T_cw = T_cr T_rw -> refinePose on map observations -> OK / LOST
 TrackResult trackFrame(const Frame& frame, const Frame& reference, const cv::Affine3d& referenceT_rw,
 	const orb_matches_t& matches, std::span<const cv::Point3d> mapPoints,
 	const orb_matches_t& mapMatches, const cv::Matx33d& K) {
-	throw std::logic_error("TODO: trackFrame");
+	const auto pairs = build3DCorrespondences(reference, frame, matches, K);
+	const auto ransac = estimatePoseRansac(pairs);
+	if (!ransac) return {};
+
+	TrackResult result{TrackingStatus::OK, composePose(ransac->T_ba, referenceT_rw), inlierMatches(pairs, ransac->inliers)};
+	const auto refined = refinePose(buildMapObservations(frame, mapPoints, mapMatches), result.T_cw, K);
+	if (refined && refined->numInliers >= MIN_INLIERS)  // otherwise the RANSAC pose stands: map matches may be bad
+		result.T_cw = refined->T_cw;
+	return result;
 }
 
+// T_ba = candidate -> current, nullopt if rejected
 std::optional<RansacResult> verifyLoopGeometry(const Frame& current, const Frame& candidate,
 	const orb_matches_t& matches, const cv::Matx33d& K) {
-	throw std::logic_error("TODO: verifyLoopGeometry");
+	return estimatePoseRansac(build3DCorrespondences(candidate, current, matches, K));
 }
 
+// Candidate with the most verified inliers: T_cw = T_ck T_kw; LOST if none passes
 TrackResult relocalizeFrame(const Frame& frame,
 	std::span<const RelocalizationCandidate> candidates, const cv::Matx33d& K) {
-	throw std::logic_error("TODO: relocalizeFrame");
+	TrackResult best;
+	size_t bestInliers = 0;
+	for (const auto& c : candidates) {
+		const auto pairs = build3DCorrespondences(c.keyframe, frame, c.matches, K);
+		const auto ransac = estimatePoseRansac(pairs);
+		if (!ransac || ransac->numInliers <= bestInliers) continue;
+		bestInliers = ransac->numInliers;
+		best = {TrackingStatus::OK, composePose(ransac->T_ba, c.T_cw), inlierMatches(pairs, ransac->inliers)};
+	}
+	return best;
 }

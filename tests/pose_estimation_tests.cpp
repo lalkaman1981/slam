@@ -148,6 +148,43 @@ int main() {
 		           "map observation information", 4);
 	}
 
+	// Tracking: 200 points seen by a reference camera and the current one, both with depth images.
+	Frame reference{{}, cv::Mat::zeros(480, 640, CV_16UC1)}, current{{}, cv::Mat::zeros(480, 640, CV_16UC1)};
+	const cv::Affine3d T_rw = expSE3(cv::Vec6d(0.3, 0.1, -0.2, 0.1, 0.2, 0.05));
+	const cv::Affine3d T_cr = expSE3(cv::Vec6d(0.05, -0.02, 0.03, 0.02, -0.04, 0.01));
+	const cv::Affine3d T_wr = inversePose(T_rw);
+	orb_matches_t trackMatches, frameToMap;
+	std::vector<cv::Point3d> mapPointsW;
+	auto addFeature = [](Frame& f, const cv::Vec3d& pc, const cv::Matx33d& K) {
+		const cv::Point2d uv = *project({pc[0], pc[1], pc[2]}, K);
+		const cv::Point px(cvRound(uv.x), cvRound(uv.y));
+		f.depth.at<uint16_t>(px) = static_cast<uint16_t>(std::lround(pc[2] * DEPTH_SCALE));
+		f.features.push_back({{0.0f, {px.x, px.y}, 0}, {}, 0.0f});
+	};
+	while (trackMatches.size() < 200) {
+		const cv::Vec3d pr(rng.uniform(-1.5, 1.5), rng.uniform(-1.0, 1.0), rng.uniform(1.5, 4.0));
+		const cv::Vec3d pc = T_cr * pr;
+		const auto uvR = project({pr[0], pr[1], pr[2]}, K), uvC = project({pc[0], pc[1], pc[2]}, K);
+		if (!uvC || uvC->x < 1 || uvC->y < 1 || uvC->x > 638 || uvC->y > 478 || uvR->x < 1 || uvR->y < 1 || uvR->x > 638 || uvR->y > 478) continue;
+		trackMatches.emplace(reference.features.size(), current.features.size());
+		frameToMap.emplace(current.features.size(), mapPointsW.size());
+		const cv::Vec3d pw = T_wr * pr;
+		mapPointsW.emplace_back(pw[0], pw[1], pw[2]);
+		addFeature(reference, pr, K);
+		addFeature(current, pc, K);
+	}
+	const cv::Affine3d T_cw_true = composePose(T_cr, T_rw);
+
+	const TrackResult tracked = trackFrame(current, reference, T_rw, trackMatches, mapPointsW, frameToMap, K);
+	checkSmall(tracked.status == TrackingStatus::OK ? std::max(0.0, distance(tracked.T_cw, T_cw_true) - 0.005) : 1.0, "trackFrame pose", 0);
+	checkSmall(tracked.inlierMatches.size() >= 190 ? 0 : 1, "trackFrame inliers", 0);
+	checkSmall(trackFrame(current, reference, T_rw, {}, mapPointsW, frameToMap, K).status == TrackingStatus::LOST ? 0 : 1, "no matches -> LOST", 0);
+
+	const std::vector<RelocalizationCandidate> candidates{{current, T_rw, {}}, {reference, T_rw, trackMatches}};
+	const TrackResult relocalized = relocalizeFrame(current, candidates, K);
+	checkSmall(relocalized.status == TrackingStatus::OK ? std::max(0.0, distance(relocalized.T_cw, T_cw_true) - 0.01) : 1.0, "relocalizeFrame pose", 0);
+	checkSmall(relocalizeFrame(current, {}, K).status == TrackingStatus::LOST ? 0 : 1, "no candidates -> LOST", 0);
+
 	std::printf("%d failures\n", failures);
 	return failures != 0;
 }
