@@ -73,7 +73,6 @@ struct MapConfig {
     double loopProjectionRadius = 10.0;
     double loopFuseRadius = 4.0;
     int loopMinOccupiedCells = 4;   // distribution check on a 4x4 image grid (team plan)
-    double loopMaxMeanError = 0.05; // metres, quality check (team plan)
     int poseGraphIterations = 20;
 
     // Keypoint grid used for area searches (ORB-SLAM FRAME_GRID_COLS / ROWS).
@@ -87,7 +86,7 @@ struct Keyframe {
     Pose T_cw;
     std::vector<int> landmarkIds; // per keypoint, -1 when unassociated
 
-    std::map<int, int> covisibilityWeights; // keyframe id -> shared landmark count
+    std::map<int, int> covisibilityWeights; // all connected keyframes -> shared landmark count
     int parentId = -1;                      // spanning tree
     std::set<int> childIds;
     std::set<int> loopEdgeIds;
@@ -195,6 +194,10 @@ void replaceLandmark(Map &map, int oldId, int newId);
 void setKeyframeBad(Map &map, int keyframeId);
 void updateNormalAndDepth(Map &map, int landmarkId);
 int predictScaleLevel(const Map &map, const Landmark &landmark, double distance);
+// All connected active keyframes, strongest first, including weak connections.
+std::vector<int> connectedKeyframes(const Map &map, int keyframeId);
+// Default: >= covisibilityMinShared, or the strongest neighbor if none qualifies.
+// Explicit positive minWeight filters all connections without the fallback.
 std::vector<int> covisibleKeyframes(const Map &map, int keyframeId, int minWeight = 0);
 std::vector<int> bestCovisibleKeyframes(const Map &map, int keyframeId, std::size_t n);
 int trackedLandmarks(const Map &map, int keyframeId, int minObservations);

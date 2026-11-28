@@ -314,7 +314,7 @@ void testLoopCorrection(const PlaneSequence &sequence) {
     const auto geometry = slam::computeLoopGeometry(map, current, origin, slam::ExecutionMode::Serial);
     check(slam::confirmLoopCandidate(map, current, geometry), "real descriptor/depth revisit did not verify");
     auto badGeometry = geometry;
-    badGeometry.geometry.meanError = 1.0;
+    badGeometry.meanReprojectionChi2 = 20.0;
     check(!slam::confirmLoopCandidate(map, current, badGeometry), "poor loop geometry was accepted");
     const auto corrected = slam::correctLoop(map, current, geometry, slam::ExecutionMode::Serial);
     check(corrected.closed && corrected.loopEdgesInGraph > 0, "verified loop missing from pose graph");

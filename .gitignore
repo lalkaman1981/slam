@@ -485,3 +485,7 @@ MigrationBackup/
 
 rgbd_dataset_freiburg2_pioneer_360*
 output/
+
+# benchmark binaries and generated inputs (bench/run_benchmarks.py)
+bench/compiled/
+bench/inputs/

@@ -86,9 +86,10 @@ int main(int argc, char **argv) {
             if (option == "--mode") {
                 if (value == "serial")
                     config.mode = slam::ExecutionMode::Serial;
-                else if (value == "serial_simd")
+                else if (value == "serial_simd") {
                     config.mode = slam::ExecutionMode::SerialSimd;
-                else if (value == "parallel")
+                    std::cerr << "serial_simd backend: " << slam::simdBackendName() << '\n';
+                } else if (value == "parallel")
                     config.mode = slam::ExecutionMode::Parallel;
                 else
                     throw std::invalid_argument("Unknown mode: " + value);

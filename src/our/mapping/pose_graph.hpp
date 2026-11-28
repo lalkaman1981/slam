@@ -61,7 +61,8 @@ Vec6 computeGraphResidual(const GraphEdge &edge, const std::vector<Pose> &poses)
 // Numerical central differences w.r.t. left increments of both poses.
 EdgeLinearization linearizeEdge(const GraphEdge &edge, const std::vector<Pose> &poses);
 GraphSystem linearizePoseGraph(const PoseGraph &graph, ExecutionMode mode);
-bool solveGraphIncrement(const GraphSystem &system, double lambda, std::vector<double> &delta);
+bool solveGraphIncrement(const GraphSystem &system, double lambda, std::vector<double> &delta,
+                         ExecutionMode mode = ExecutionMode::Serial);
 double poseGraphChi2(const PoseGraph &graph);
 // Levenberg-Marquardt; fixed nodes (at least the first keyframe) are not moved.
 PoseGraphResult optimizePoseGraph(PoseGraph &graph, int iterations, ExecutionMode mode);

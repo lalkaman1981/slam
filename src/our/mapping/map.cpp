@@ -5,10 +5,8 @@
 #include "execution.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <limits>
-#include <numeric>
 #include <stdexcept>
 #include <string>
 
@@ -19,7 +17,6 @@ namespace slam {
 namespace {
 
 constexpr int kNone = -1;
-constexpr int kHistogramBins = 30;
 constexpr double kEpipolarChi2 = 3.84; // 95% chi-square, 1 DoF
 constexpr int kLocalMapMaxKeyframes = 80;
 
@@ -89,40 +86,8 @@ bool checkDistEpipolarLine(const Keypoint &kp1, const Keypoint &kp2, const Mat3 
     return num * num / den < kEpipolarChi2 * sigma2;
 }
 
-// Keeps histogram bins holding the three largest counts (ORB-SLAM ComputeThreeMaxima).
-std::vector<bool> rotationConsistency(const std::vector<std::vector<std::size_t>> &histogram,
-                                      std::size_t nMatches) {
-    std::array<std::size_t, 3> top{};
-    std::array<int, 3> topBin{kNone, kNone, kNone};
-    for (std::size_t b = 0; b < histogram.size(); ++b) {
-        const std::size_t s = histogram[b].size();
-        if (s > top[0]) {
-            top = {s, top[0], top[1]};
-            topBin = {static_cast<int>(b), topBin[0], topBin[1]};
-        } else if (s > top[1]) {
-            top = {top[0], s, top[1]};
-            topBin = {topBin[0], static_cast<int>(b), topBin[1]};
-        } else if (s > top[2]) {
-            top[2] = s;
-            topBin[2] = static_cast<int>(b);
-        }
-    }
-    if (static_cast<double>(top[1]) < 0.1 * static_cast<double>(top[0]))
-        topBin[1] = topBin[2] = kNone;
-    else if (static_cast<double>(top[2]) < 0.1 * static_cast<double>(top[0]))
-        topBin[2] = kNone;
-
-    std::vector<bool> keep(nMatches, false);
-    for (int b : topBin) {
-        if (b < 0) continue;
-        for (std::size_t m : histogram[toIndex(b)])
-            keep[m] = true;
-    }
-    return keep;
-}
-
 // Unassociated keypoint pairs satisfying the epipolar constraint (ORB-SLAM SearchForTriangulation,
-// brute force instead of the BoW vocabulary tree).
+// brute force instead of the BoW vocabulary tree). LocalMapping disables the orientation histogram.
 std::vector<std::pair<int, int>> searchForTriangulation(const Map &map, const Keyframe &kf1,
                                                         const Keyframe &kf2, const Mat3 &F12) {
     const CameraIntrinsics &cam = map.camera;
@@ -135,7 +100,6 @@ std::vector<std::pair<int, int>> searchForTriangulation(const Map &map, const Ke
         used2[i] = resolveLandmarkId(map, kf2.landmarkIds[i]) >= 0;
 
     std::vector<std::pair<int, int>> pairs;
-    std::vector<std::vector<std::size_t>> histogram(kHistogramBins);
     for (std::size_t i1 = 0; i1 < kf1.frame.keypoints.size(); ++i1) {
         if (resolveLandmarkId(map, kf1.landmarkIds[i1]) >= 0) continue;
         const Keypoint &kp1 = kf1.frame.keypoints[i1];
@@ -159,18 +123,10 @@ std::vector<std::pair<int, int>> searchForTriangulation(const Map &map, const Ke
         }
         if (bestIdx < 0) continue;
         used2[toIndex(bestIdx)] = true;
-        double rot = kp1.angle - kf2.frame.keypoints[toIndex(bestIdx)].angle;
-        if (rot < 0.0) rot += 360.0;
-        const auto bin = static_cast<std::size_t>(std::lround(rot * kHistogramBins / 360.0)) % kHistogramBins;
-        histogram[bin].push_back(pairs.size());
         pairs.emplace_back(static_cast<int>(i1), bestIdx);
     }
 
-    const std::vector<bool> keep = rotationConsistency(histogram, pairs.size());
-    std::vector<std::pair<int, int>> filtered;
-    for (std::size_t m = 0; m < pairs.size(); ++m)
-        if (keep[m]) filtered.push_back(pairs[m]);
-    return filtered;
+    return pairs;
 }
 
 // Linear triangulation from normalized image coordinates (smallest singular vector of A).
@@ -225,7 +181,7 @@ Map createMap(const CameraIntrinsics &camera, const MapConfig &config) {
 // ---------------------------------------------------------------------------------------------
 
 int resolveLandmarkId(const Map &map, int landmarkId) {
-    for (int guard = 0; landmarkId >= 0 && guard < 64; ++guard) {
+    for (std::size_t guard = 0; landmarkId >= 0 && guard < map.landmarks.size(); ++guard) {
         const auto it = map.landmarks.find(landmarkId);
         if (it == map.landmarks.end()) return kNone;
         if (!it->second.bad) return landmarkId;
@@ -305,7 +261,8 @@ void setKeyframeBad(Map &map, int keyframeId) {
         for (int childId : children) {
             const Keyframe &child = map.keyframes.at(childId);
             if (child.bad) continue;
-            for (const auto &[candidate, w] : child.covisibilityWeights) {
+            for (int candidate : covisibleKeyframes(map, childId)) {
+                const int w = child.covisibilityWeights.at(candidate);
                 if (parentCandidates.count(candidate) != 0 && w > bestWeight) {
                     bestWeight = w;
                     bestChild = childId;
@@ -337,13 +294,17 @@ void updateNormalAndDepth(Map &map, int landmarkId) {
         lm.referenceKeyframeId = lm.observations.begin()->first;
 
     Vec3 normal{};
+    std::size_t directions = 0;
     for (const auto &[kfId, idx] : lm.observations) {
         const Vec3 dir = lm.position - cameraCenter(map.keyframes.at(kfId).T_cw);
         const double n = norm(dir);
-        if (n > 0.0) normal += (1.0 / n) * dir;
+        if (n > 0.0) {
+            normal += (1.0 / n) * dir;
+            ++directions;
+        }
     }
-    const double n = norm(normal);
-    if (n > 0.0) lm.normal = (1.0 / n) * normal;
+    // Average unit rays, preserving their angular spread for the viewing-angle test.
+    lm.normal = directions ? (1.0 / static_cast<double>(directions)) * normal : Vec3{};
 
     const Keyframe &ref = map.keyframes.at(lm.referenceKeyframeId);
     const double dist = norm(lm.position - cameraCenter(ref.T_cw));
@@ -358,10 +319,10 @@ int predictScaleLevel(const Map &map, const Landmark &landmark, double distance)
     return std::clamp(level, 0, map.config.levels - 1);
 }
 
-std::vector<int> covisibleKeyframes(const Map &map, int keyframeId, int minWeight) {
+std::vector<int> connectedKeyframes(const Map &map, int keyframeId) {
     std::vector<std::pair<int, int>> weighted;
     for (const auto &[otherId, w] : map.keyframes.at(keyframeId).covisibilityWeights) {
-        if (w < minWeight || map.keyframes.at(otherId).bad) continue;
+        if (w <= 0 || map.keyframes.at(otherId).bad) continue;
         weighted.emplace_back(w, otherId);
     }
     std::sort(weighted.begin(), weighted.end(), [](const auto &a, const auto &b) {
@@ -371,6 +332,21 @@ std::vector<int> covisibleKeyframes(const Map &map, int keyframeId, int minWeigh
     ids.reserve(weighted.size());
     for (const auto &[w, id] : weighted)
         ids.push_back(id);
+    return ids;
+}
+
+std::vector<int> covisibleKeyframes(const Map &map, int keyframeId, int minWeight) {
+    auto ids = connectedKeyframes(map, keyframeId);
+    const auto &weights = map.keyframes.at(keyframeId).covisibilityWeights;
+    const int threshold = minWeight > 0 ? minWeight : map.config.covisibilityMinShared;
+    const auto end = std::find_if(ids.begin(), ids.end(),
+                                  [&](int id) { return weights.at(id) < threshold; });
+    // Default searches retain one strongest neighbor if none reaches the threshold.
+    // Explicit thresholds (e.g. the Essential Graph) have no fallback.
+    if (minWeight == 0 && end == ids.begin() && !ids.empty())
+        ids.resize(1);
+    else
+        ids.erase(end, ids.end());
     return ids;
 }
 
@@ -445,8 +421,10 @@ int initializeMap(Map &map, const Frame &firstFrame) {
 
 bool shouldInsertKeyframe(const Frame &frame, const TrackingResult &tracking, const Map &map) {
     const MapConfig &cfg = map.config;
-    if (!tracking.ok || map.keyframes.empty()) return false;
-    const int nKeyframes = static_cast<int>(map.keyframes.size());
+    if (!tracking.ok || map.keyframes.empty() || !cfg.localMappingIdle) return false;
+    // Culled keyframes remain as trajectory references, not active map members.
+    const int nKeyframes = static_cast<int>(std::count_if(
+        map.keyframes.begin(), map.keyframes.end(), [](const auto &entry) { return !entry.second.bad; }));
 
     // Condition 1: more than 20 frames since the last relocalization.
     if (map.lastRelocalizationFrameId >= 0 &&
@@ -555,7 +533,6 @@ LocalMap selectLocalMap(const Map &map, const std::vector<int> &trackedLandmarkI
 std::vector<VisibleLandmark> findVisibleLandmarks(const Map &map, const LocalMap &localMap,
                                                   const Pose &predictedPose, const CameraIntrinsics &camera,
                                                   ExecutionMode mode) {
-    detail::requireSimdSupport(mode);
     std::vector<int> ids;
     std::vector<Vec3> positions;
     for (int slot : localMap.landmarkIds) {
@@ -722,8 +699,8 @@ void updateCovisibility(Map &map, int keyframeId) {
     }
 
     for (const auto &[otherId, w] : kf.covisibilityWeights)
-        map.keyframes.at(otherId).covisibilityWeights.erase(keyframeId);
-    kf.covisibilityWeights.clear();
+        if (counter.count(otherId) == 0) map.keyframes.at(otherId).covisibilityWeights.erase(keyframeId);
+    kf.covisibilityWeights = counter;
     if (counter.empty()) return;
 
     int maxCount = 0, maxId = kNone;
@@ -732,14 +709,8 @@ void updateCovisibility(Map &map, int keyframeId) {
             maxCount = count;
             maxId = otherId;
         }
-        if (count >= map.config.covisibilityMinShared) {
-            kf.covisibilityWeights[otherId] = count;
-            map.keyframes.at(otherId).covisibilityWeights[keyframeId] = count;
-        }
-    }
-    if (kf.covisibilityWeights.empty()) {
-        kf.covisibilityWeights[maxId] = maxCount;
-        map.keyframes.at(maxId).covisibilityWeights[keyframeId] = maxCount;
+        // Retain every shared count; strong-neighbor selection is separate.
+        map.keyframes.at(otherId).covisibilityWeights[keyframeId] = count;
     }
     // Spanning tree: a new keyframe hangs from the keyframe sharing most points (Sec. III-E).
     if (kf.parentId < 0 && keyframeId != map.originKeyframeId) {
@@ -824,8 +795,9 @@ int fuseLandmarksIntoKeyframe(Map &map, int keyframeId, const std::vector<int> &
         const Landmark &lm = map.landmarks.at(id);
         if (lm.observations.count(keyframeId) != 0) continue;
 
+        const Vec3 pointCamera = transformPoint(kf.T_cw, lm.position);
         double u = 0.0, v = 0.0;
-        if (!project(transformPoint(kf.T_cw, lm.position), cam, u, v)) continue;
+        if (!project(pointCamera, cam, u, v)) continue;
         const Vec3 PO = lm.position - cameraCenter(kf.T_cw);
         const double dist = norm(PO);
         if (dist < 0.8 * lm.minDistance || dist > 1.2 * lm.maxDistance) continue;
@@ -839,8 +811,16 @@ int fuseLandmarksIntoKeyframe(Map &map, int keyframeId, const std::vector<int> &
             if (kp.octave < level - 1 || kp.octave > level) continue;
             if (checkReprojection) {
                 const double eu = u - kp.u, ev = v - kp.v;
-                if ((eu * eu + ev * ev) * map.invLevelSigma2[toIndex(kp.octave)] > map.config.chi2Mono)
-                    continue;
+                double error2 = eu * eu + ev * ev;
+                double threshold = map.config.chi2Mono;
+                const float depth = kf.frame.depths[toIndex(idx)];
+                if (map.config.useDepthInBundleAdjustment && depth > 0.0f) {
+                    // RGB-D uses the same virtual right-image observation as local BA.
+                    const double er = eu - cam.bf / pointCamera[2] + cam.bf / depth;
+                    error2 += er * er;
+                    threshold = map.config.chi2Stereo;
+                }
+                if (error2 * map.invLevelSigma2[toIndex(kp.octave)] > threshold) continue;
             }
             const int d = hammingDistance(lm.descriptor, kf.frame.descriptors[toIndex(idx)]);
             if (d < bestDist) {

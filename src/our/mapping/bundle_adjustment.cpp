@@ -112,7 +112,7 @@ void buildNormalEquations(const BAProblem &problem, const std::vector<Observatio
 // Solves the damped system with the points eliminated (Schur complement):
 // (A - B C^-1 B^T) dp = -gp + B C^-1 gx,  dx = C^-1 (-gx - B^T dp).
 bool solveSchur(const BAProblem &problem, const NormalEquations &ne, double lambda, std::vector<Vec6> &dp,
-                std::vector<Vec3> &dx) {
+                std::vector<Vec3> &dx, ExecutionMode mode) {
     std::vector<int> freeIndex(problem.poses.size(), -1);
     std::size_t nFree = 0;
     for (std::size_t i = 0; i < problem.poses.size(); ++i)
@@ -137,7 +137,7 @@ bool solveSchur(const BAProblem &problem, const NormalEquations &ne, double lamb
         for (std::size_t k : ne.pointObservations[j])
             if (freeIndex[problem.observations[k].poseIndex] >= 0) coupled.push_back(k);
         for (std::size_t a : coupled) {
-            const Mat63 BCinv = ne.B[a] * Cinv[j];
+            const Mat63 BCinv = detail::multiply(ne.B[a], Cinv[j], mode);
             const std::size_t oa = 6 * static_cast<std::size_t>(freeIndex[problem.observations[a].poseIndex]);
             const Vec6 r = BCinv * ne.gx[j];
             for (std::size_t q = 0; q < 6; ++q)
@@ -145,13 +145,13 @@ bool solveSchur(const BAProblem &problem, const NormalEquations &ne, double lamb
             for (std::size_t b : coupled) {
                 const std::size_t ob =
                     6 * static_cast<std::size_t>(freeIndex[problem.observations[b].poseIndex]);
-                S.addBlock(oa, ob, -(BCinv * ne.B[b].transpose()));
+                S.addBlock(oa, ob, -detail::multiply(BCinv, ne.B[b].transpose(), mode));
             }
         }
     }
 
     std::vector<double> x;
-    if (nFree > 0 && !solveCholesky(S, rhs, x)) return false;
+    if (nFree > 0 && !solveCholesky(S, rhs, x, mode)) return false;
     dp.assign(problem.poses.size(), Vec6{});
     for (std::size_t i = 0; i < problem.poses.size(); ++i) {
         if (freeIndex[i] < 0) continue;
@@ -279,7 +279,6 @@ void evaluateObservationPair(const Pose &poseA, const Pose &poseB, const Vec3 &p
 
 void computeObservationResiduals(const BAProblem &problem, std::vector<ObservationResidual> &out,
                                  bool withJacobians, ExecutionMode mode) {
-    detail::requireSimdSupport(mode);
     out.resize(problem.observations.size());
     const auto workers = detail::workerCount(out.size(), mode);
     detail::runPartitions(out.size(), workers, [&](std::size_t begin, std::size_t end, std::size_t) {
@@ -327,7 +326,7 @@ double optimizeBAProblem(BAProblem &problem, int iterations, bool robust, Execut
         for (int attempt = 0; attempt < kMaxLambdaTries && !accepted; ++attempt) {
             std::vector<Vec6> dp;
             std::vector<Vec3> dx;
-            if (!solveSchur(problem, ne, lambda, dp, dx)) {
+            if (!solveSchur(problem, ne, lambda, dp, dx, mode)) {
                 lambda *= nu;
                 nu *= 2.0;
                 continue;
@@ -431,7 +430,6 @@ BAProblem buildLocalBAProblem(const Map &map, int keyframeId) {
 }
 
 BAResult localBundleAdjustment(Map &map, int keyframeId, ExecutionMode mode) {
-    detail::requireSimdSupport(mode);
     BAResult result;
     BAProblem problem = buildLocalBAProblem(map, keyframeId);
     for (bool fixed : problem.fixedPose) {
@@ -442,26 +440,30 @@ BAResult localBundleAdjustment(Map &map, int keyframeId, ExecutionMode mode) {
     }
     result.optimizedPoints = static_cast<int>(problem.points.size());
     result.observations = static_cast<int>(problem.observations.size());
-    if (problem.observations.empty() || result.optimizedKeyframes == 0) return result;
+    if (problem.observations.empty()) return result;
 
     result.initialCost = evaluateCost(problem, true, mode);
     optimizeBAProblem(problem, map.config.baFirstIterations, true, mode);
 
-    // Observations marked as outliers are discarded in the middle of the optimization...
+    // ORB-SLAM 2015 removes first-pass outlier edges permanently, then runs ten more
+    // iterations with the Huber kernels still attached.
     std::vector<ObservationResidual> residuals;
     computeObservationResiduals(problem, residuals, false, mode);
     for (std::size_t k = 0; k < residuals.size(); ++k) {
         BAObservation &obs = problem.observations[k];
-        if (residuals[k].chi2 > chi2Threshold(problem, obs) || !residuals[k].inFront) obs.active = false;
+        if (!std::isfinite(residuals[k].chi2) || residuals[k].chi2 > chi2Threshold(problem, obs) ||
+            !residuals[k].inFront)
+            obs.active = false;
     }
-    result.finalCost = optimizeBAProblem(problem, map.config.baSecondIterations, false, mode);
+    result.finalCost = optimizeBAProblem(problem, map.config.baSecondIterations, true, mode);
 
     // ...and at the end.
     computeObservationResiduals(problem, residuals, false, mode);
     std::vector<std::pair<int, int>> outliers;
     for (std::size_t k = 0; k < residuals.size(); ++k) {
         const BAObservation &obs = problem.observations[k];
-        if (residuals[k].chi2 > chi2Threshold(problem, obs) || !residuals[k].inFront)
+        if (!obs.active || !std::isfinite(residuals[k].chi2) ||
+            residuals[k].chi2 > chi2Threshold(problem, obs) || !residuals[k].inFront)
             outliers.emplace_back(obs.landmarkId, obs.keyframeId);
     }
     for (const auto &[landmarkId, kfId] : outliers) {
@@ -482,7 +484,6 @@ BAResult localBundleAdjustment(Map &map, int keyframeId, ExecutionMode mode) {
 }
 
 LandmarkRefinement refineLandmark(const Map &map, int landmarkId, ExecutionMode mode) {
-    detail::requireSimdSupport(mode);
     LandmarkRefinement result;
     result.landmarkId = landmarkId;
     const Landmark &lm = map.landmarks.at(landmarkId);
@@ -540,7 +541,7 @@ LandmarkRefinement refineLandmark(const Map &map, int landmarkId, ExecutionMode 
             const double threshold = obs.hasDepth ? map.config.chi2Stereo : map.config.chi2Mono;
             const double w = obs.information * robustWeight(r.chi2, threshold, true);
             const Mat3 JT = r.jacobianPoint.transpose();
-            H += w * (JT * r.jacobianPoint);
+            H += w * detail::multiply(JT, r.jacobianPoint, mode);
             g += w * (JT * r.error);
         }
         Mat3 Hinv;
@@ -560,7 +561,6 @@ LandmarkRefinement refineLandmark(const Map &map, int landmarkId, ExecutionMode 
 }
 
 int refineLandmarks(Map &map, const LocalMap &localMap, ExecutionMode mode) {
-    detail::requireSimdSupport(mode);
     std::vector<int> ids;
     std::set<int> seen;
     for (int slot : localMap.landmarkIds) {

@@ -2,11 +2,15 @@
 // PVS-Studio Static Code Analyzer for C, C++, C#, and Java: http://www.viva64.com
 
 #include "linalg.hpp"
+#include "execution.hpp"
 
 #include <algorithm>
 #include <numeric>
+#include <limits>
 
 namespace slam {
+
+const char *simdBackendName() noexcept { return detail::simdBackend(); }
 
 bool invert3(const Mat3 &a, Mat3 &inverse) {
     const double c00 = a(1, 1) * a(2, 2) - a(1, 2) * a(2, 1);
@@ -30,37 +34,42 @@ bool invert3(const Mat3 &a, Mat3 &inverse) {
     return true;
 }
 
-bool solveCholesky(const DenseMatrix &a, const std::vector<double> &b, std::vector<double> &x) {
+bool solveCholesky(const DenseMatrix &a, const std::vector<double> &b, std::vector<double> &x,
+                   ExecutionMode mode) {
     const std::size_t n = a.rows();
     if (a.cols() != n || b.size() != n) return false;
+    double scale = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(a(i, i)) || !std::isfinite(b[i])) return false;
+        scale = std::max(scale, std::abs(a(i, i)));
+    }
+    const double tolerance = std::numeric_limits<double>::epsilon() * scale * static_cast<double>(n);
     DenseMatrix l(n, n);
     for (std::size_t j = 0; j < n; ++j) {
-        double diag = a(j, j);
-        for (std::size_t k = 0; k < j; ++k)
-            diag -= l(j, k) * l(j, k);
-        if (!(diag > 1e-12)) return false;
+        const auto prefix = l.row(j).first(j);
+        const double diag = a(j, j) - detail::innerProduct(prefix, prefix, mode);
+        if (!std::isfinite(diag) || diag <= tolerance) return false;
         const double ljj = std::sqrt(diag);
         l(j, j) = ljj;
         for (std::size_t i = j + 1; i < n; ++i) {
-            double s = a(i, j);
-            for (std::size_t k = 0; k < j; ++k)
-                s -= l(i, k) * l(j, k);
+            const double s = a(i, j) - detail::innerProduct(l.row(i).first(j), prefix, mode);
+            if (!std::isfinite(s)) return false;
             l(i, j) = s / ljj;
         }
     }
     // Forward substitution L y = b, then backward L^T x = y.
     x.assign(n, 0.0);
     for (std::size_t i = 0; i < n; ++i) {
-        double s = b[i];
-        for (std::size_t k = 0; k < i; ++k)
-            s -= l(i, k) * x[k];
+        const double s = b[i] - detail::innerProduct(l.row(i).first(i), std::span<const double>(x).first(i), mode);
         x[i] = s / l(i, i);
+        if (!std::isfinite(x[i])) return false;
     }
     for (std::size_t ii = n; ii-- > 0;) {
         double s = x[ii];
         for (std::size_t k = ii + 1; k < n; ++k)
             s -= l(k, ii) * x[k];
         x[ii] = s / l(ii, ii);
+        if (!std::isfinite(x[ii])) return false;
     }
     return true;
 }

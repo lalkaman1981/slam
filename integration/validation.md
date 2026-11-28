@@ -1,5 +1,57 @@
 # Validation: 27 November 2026
 
+## Person 3 paper-alignment revision
+
+Reference and scope: [paper_mapping.md](paper_mapping.md). Six suites pass in Release
+and Debug with AddressSanitizer/UndefinedBehaviorSanitizer. New regressions cover
+covisibility, culling, triangulation, fusion, permanent BA outlier removal, fixed-camera
+BA, scaled/invalid linear systems, nonidentity loop refinement with false matches,
+missing sensor depth, uncertain map depth, reciprocal fusion and the fixed world origin.
+The linear solver, BA and loop translation units also compile for x86-64 SSE2;
+runtime and timing checks were performed on Apple arm64 NEON. The x86 build was not run.
+
+On the 360-frame synthetic mapping sequence, all three modes close one loop at frame
+286, insert 48 keyframes and retain 24. Final keyframe ATE RMSE is **0.0177912 m**;
+the loop reduces graph chi-squared from `0.00458575` to `0.000071369`. This driver
+supplies synthetic tracking, so it establishes mapping behavior separately from the
+image pipeline. Reducing graph cost does not guarantee lower ground-truth ATE at
+every step.
+
+| Mapping mode | Total updateMap time | Speedup |
+| --- | ---: | ---: |
+| serial | 2.92076 s | 1.00x |
+| serial_simd | 2.63588 s | 1.11x |
+| parallel | 1.79490 s | 1.63x |
+
+The 180-variable Cholesky benchmark measures `0.33060 / 0.16049 ms` for scalar/SIMD
+(2.06x), with maximum known-solution error `4.44e-16`. The 60000-observation
+residual/Jacobian benchmark measures `1.75210 / 0.71476 / 0.31431 ms` for
+scalar/SIMD/parallel; maximum numeric difference is `1.14e-13`. These are single-run
+illustrations on this machine, not whole-SLAM speedups or statistical estimates.
+
+Pioneer 360 still tracks **31/830 paired frames**, with **799 LOST**, in both serial
+and SIMD. Their exported trajectories are identical. Rigid-aligned translation MSE
+on those 31 tracked poses is **0.0000786932 m²**, RMSE **0.00887092 m**. This is
+slightly worse than the preceding short-subset result (`0.0000507416 m²`); mapping
+agreement with the paper does not itself establish better real-sequence accuracy.
+Person 2's initial depth-RANSAC failure and recovery behavior remain unchanged.
+
+Current logs, trajectories, maps, MSE and benchmark CSVs are in
+`output/person3-paper/`. Reproduce:
+
+```sh
+ctest --test-dir build/integration --output-on-failure
+build/integration/slam_mapping_sequence output/person3-paper/synthetic --mode all
+build/integration/slam_rgbd data/rgbd_dataset_freiburg2_pioneer_360 output/person3-paper/pioneer-serial --mode serial
+build/integration/slam_rgbd data/rgbd_dataset_freiburg2_pioneer_360 output/person3-paper/pioneer-simd --mode serial_simd
+build/integration/slam_mapping_bench --solver
+build/integration/slam_mapping_bench
+```
+
+## Earlier integration baseline
+
+The measurements below predate the mapping revision above and are retained for comparison.
+
 Environment: Apple arm64, Apple Clang 21, C++23, Release, OpenCV 4.11.0.
 Imported remote revision: `ddd9bdd` (`pose_estimation_base`), including `master` at
 `15659fe`. `git diff --exit-code origin/pose_estimation_base --` reports no changes

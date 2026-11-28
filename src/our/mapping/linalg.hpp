@@ -3,7 +3,10 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <span>
 #include <vector>
+
+#include "execution_mode.hpp"
 
 namespace slam {
 
@@ -154,6 +157,10 @@ class DenseMatrix {
     double &operator()(std::size_t r, std::size_t c) { return values[r * nCols + c]; }
     double operator()(std::size_t r, std::size_t c) const { return values[r * nCols + c]; }
 
+    [[nodiscard]] std::span<const double> row(std::size_t r) const {
+        return std::span<const double>(values).subspan(r * nCols, nCols);
+    }
+
     template <std::size_t BR, std::size_t BC>
     void addBlock(std::size_t r0, std::size_t c0, const Matrix<BR, BC> &b) {
         for (std::size_t r = 0; r < BR; ++r)
@@ -167,8 +174,10 @@ class DenseMatrix {
     std::vector<double> values;
 };
 
-// Solves a x = b for symmetric positive definite a (Cholesky). Returns false if a is not SPD.
-bool solveCholesky(const DenseMatrix &a, const std::vector<double> &b, std::vector<double> &x);
+// Solves a x = b using the lower triangle of symmetric positive definite a.
+// Returns false for invalid dimensions, non-finite inputs or non-positive pivots.
+bool solveCholesky(const DenseMatrix &a, const std::vector<double> &b, std::vector<double> &x,
+                   ExecutionMode mode = ExecutionMode::Serial);
 
 // Cyclic Jacobi eigen decomposition of a symmetric matrix.
 // Eigenvalues are sorted ascending; column k of `vectors` is the eigenvector of values[k].

@@ -102,4 +102,34 @@ LoopGeometryResult verifyLoopGeometry(const Frame &current, const Frame &candida
     return result;
 }
 
+LoopGeometryResult verifyLoopGeometry(std::span<const Vec3> currentPoints,
+                                      std::span<const Vec3> candidatePoints, ExecutionMode /*mode*/) {
+    if (currentPoints.size() != candidatePoints.size())
+        throw std::invalid_argument("loop geometry needs equally sized map point arrays");
+    LoopGeometryResult result;
+    result.inliers.assign(currentPoints.size(), false);
+    std::vector<PointPair3D> pairs;
+    pairs.reserve(currentPoints.size());
+    for (std::size_t i = 0; i < currentPoints.size(); ++i) {
+        const auto &a = candidatePoints[i], &b = currentPoints[i];
+        if (!std::all_of(a.data.begin(), a.data.end(), [](double x) { return std::isfinite(x); }) ||
+            !std::all_of(b.data.begin(), b.data.end(), [](double x) { return std::isfinite(x); }))
+            continue;
+        pairs.push_back({{a[0], a[1], a[2]}, {b[0], b[1], b[2]}, i, i});
+    }
+    const auto geometry = ::estimatePoseRansac(pairs);
+    if (!geometry) return result;
+    result.T_current_candidate = toMappingPose(geometry->T_ba);
+    const auto errors = ::computeAlignmentErrors(pairs, geometry->T_ba);
+    for (std::size_t i = 0; i < pairs.size(); ++i) {
+        if (!geometry->inliers[i]) continue;
+        result.inliers[pairs[i].idxA] = true;
+        ++result.inlierCount;
+        result.meanError += errors[i];
+    }
+    if (result.inlierCount > 0) result.meanError /= result.inlierCount;
+    result.success = result.inlierCount >= static_cast<int>(MIN_INLIERS);
+    return result;
+}
+
 } // namespace slam

@@ -4,6 +4,7 @@
 // delegate to their unchanged implementations in src/our. Mapping keeps its
 // compact keyframe storage and explicitly converts pose and feature conventions.
 
+#include <span>
 #include <vector>
 
 #include "slam_types.hpp"
@@ -32,5 +33,10 @@ struct LoopGeometryResult {
 LoopGeometryResult verifyLoopGeometry(const Frame &current, const Frame &candidate,
                                       const std::vector<Match> &matches, const CameraIntrinsics &camera,
                                       ExecutionMode mode);
+
+// Loop hypotheses use existing map points expressed in each keyframe's camera.
+// This keeps triangulated points usable even when their image depth sample is absent.
+LoopGeometryResult verifyLoopGeometry(std::span<const Vec3> currentPoints,
+                                      std::span<const Vec3> candidatePoints, ExecutionMode mode);
 
 } // namespace slam

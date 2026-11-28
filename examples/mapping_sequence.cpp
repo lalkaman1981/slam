@@ -397,6 +397,8 @@ int main(int argc, char *argv[]) {
         for (const auto &[name, mode] : modes) {
             if (modeName != "all" && name != modeName) continue;
             std::cout << "Mapping mode: " << name << '\n';
+            if (mode == slam::ExecutionMode::SerialSimd)
+                std::cerr << "serial_simd backend: " << slam::simdBackendName() << '\n';
             const double elapsed =
                 runSequence(modeName == "all" ? outputDir / name : outputDir, frames, mode);
             if (name == "serial") serialTime = elapsed;

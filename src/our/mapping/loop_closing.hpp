@@ -4,6 +4,7 @@
 // matching, geometric verification reuses person 2's verifyLoopGeometry.
 
 #include <map>
+#include <limits>
 #include <set>
 #include <vector>
 
@@ -16,12 +17,13 @@ namespace slam {
 struct LoopGeometry {
     bool success = false;
     int candidateKeyframeId = -1;
-    LoopGeometryResult geometry;         // from person 2
+    LoopGeometryResult geometry;         // person 2's hypothesis, refined using map reprojections
     Pose correctedT_cw;                  // current keyframe pose expressed in the loop side frame
     std::vector<int> matchedLandmarkIds; // per current keypoint: loop-side landmark or -1
     std::vector<int> loopLandmarkIds;    // landmarks of the candidate and its neighbours
     int inlierMatches = 0;
     int totalMatches = 0;
+    double meanReprojectionChi2 = std::numeric_limits<double>::infinity();
 };
 
 struct LoopClosureResult {
@@ -39,12 +41,17 @@ struct LoopClosureResult {
 
 // Sec. VII-A: score against covisible neighbours (theta_min = 30) gives s_min; older keyframes
 // scoring at least s_min and not connected to the keyframe are candidates; a candidate is accepted
-// after three consecutive consistent detections. Updates map.consistentGroups.
+// after three consecutive group extensions (four detections). Updates map.consistentGroups.
 std::vector<int> findLoopCandidates(Map &map, int keyframeId, ExecutionMode mode);
 
 // Sec. VII-B: descriptor matches against the candidate, geometric verification, then guided
 // search of the loop-side map points with the estimated transformation.
 LoopGeometry computeLoopGeometry(const Map &map, int keyframeId, int candidateId, ExecutionMode mode);
+// Fixed-scale form of the paper's bidirectional Sim(3) refinement. Matched IDs are
+// candidate-side landmarks indexed by current keypoint; rejected entries become -1.
+// The map is read-only and the pose maps candidate-camera coordinates to current.
+int refineLoopTransform(const Map &map, int keyframeId, int candidateId,
+                        std::vector<int> &matchedLandmarkIds, Pose &T_current_candidate, ExecutionMode mode);
 // Checks the number, image distribution and alignment quality of the loop correspondences.
 bool confirmLoopCandidate(const Map &map, int keyframeId, const LoopGeometry &geometry);
 

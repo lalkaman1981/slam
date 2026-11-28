@@ -11,9 +11,6 @@
 
 namespace slam {
 
-// Mapping implementations share one interface; upstream feature/tracking remain serial.
-enum class ExecutionMode { Serial, SerialSimd, Parallel };
-
 // 256-bit ORB descriptor.
 using Descriptor = std::array<std::uint8_t, 32>;
 

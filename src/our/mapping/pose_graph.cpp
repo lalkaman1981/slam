@@ -82,7 +82,6 @@ EdgeLinearization linearizeEdge(const GraphEdge &edge, const std::vector<Pose> &
 }
 
 GraphSystem linearizePoseGraph(const PoseGraph &graph, ExecutionMode mode) {
-    detail::requireSimdSupport(mode);
     GraphSystem system;
     system.variableOfNode.assign(graph.poses.size(), -1);
     std::size_t nVars = 0;
@@ -143,14 +142,15 @@ GraphSystem linearizePoseGraph(const PoseGraph &graph, ExecutionMode mode) {
     return system;
 }
 
-bool solveGraphIncrement(const GraphSystem &system, double lambda, std::vector<double> &delta) {
+bool solveGraphIncrement(const GraphSystem &system, double lambda, std::vector<double> &delta,
+                         ExecutionMode mode) {
     DenseMatrix damped = system.H;
     std::vector<double> rhs(system.b.size());
     for (std::size_t i = 0; i < rhs.size(); ++i) {
         damped(i, i) += lambda;
         rhs[i] = -system.b[i];
     }
-    return solveCholesky(damped, rhs, delta);
+    return solveCholesky(damped, rhs, delta, mode);
 }
 
 double poseGraphChi2(const PoseGraph &graph) {
@@ -180,7 +180,7 @@ PoseGraphResult optimizePoseGraph(PoseGraph &graph, int iterations, ExecutionMod
         double maxStep = 0.0;
         for (int attempt = 0; attempt < kMaxLambdaTries && !accepted; ++attempt) {
             std::vector<double> delta;
-            if (!solveGraphIncrement(system, lambda, delta)) {
+            if (!solveGraphIncrement(system, lambda, delta, mode)) {
                 lambda *= nu;
                 nu *= 2.0;
                 continue;

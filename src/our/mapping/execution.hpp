@@ -2,17 +2,42 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cstddef>
+#include <cstring>
 #include <exception>
 #include <stdexcept>
+#include <span>
 #include <thread>
 #include <vector>
 
 #include "slam_types.hpp"
 
-#if defined(__aarch64__)
+// serial_simd backend, chosen at compile time. Explicit intrinsics are used where they
+// exist; other GCC/Clang targets use portable vector extensions, which the compiler
+// lowers to the target's SIMD unit (RVV, VSX, wasm simd128, ...) or to scalar code.
+// SLAM_SIMD_FORCE_PORTABLE / SLAM_SIMD_FORCE_SCALAR override detection so every
+// backend can be built and tested on one machine.
+#if defined(SLAM_SIMD_FORCE_SCALAR)
+#define SLAM_SIMD_SCALAR 1
+#elif defined(SLAM_SIMD_FORCE_PORTABLE)
+#if !defined(__GNUC__) && !defined(__clang__)
+#error "SLAM_SIMD_FORCE_PORTABLE requires GCC or Clang vector extensions"
+#endif
+#define SLAM_SIMD_VECTOR_EXT 1
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#define SLAM_SIMD_NEON 1
+#elif defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#define SLAM_SIMD_SSE2 1
+#elif defined(__GNUC__) || defined(__clang__)
+#define SLAM_SIMD_VECTOR_EXT 1
+#else
+#define SLAM_SIMD_SCALAR 1
+#endif
+
+#if defined(SLAM_SIMD_NEON)
 #include <arm_neon.h>
-#elif defined(__SSE2__)
+#elif defined(SLAM_SIMD_SSE2)
 #include <emmintrin.h>
 #endif
 
@@ -51,22 +76,41 @@ template <typename Function> void runPartitions(std::size_t count, std::size_t w
 
 // Two independent observations per vector. No approximate reciprocal or fast-math.
 struct Double2 {
-#if defined(__aarch64__)
+#if defined(SLAM_SIMD_NEON)
     float64x2_t value;
     Double2(double a, double b) {
         const double v[2]{a, b};
         value = vld1q_f64(v);
     }
     explicit Double2(float64x2_t v) : value(v) {}
+    static Double2 load(const double *v) { return Double2(vld1q_f64(v)); }
     void store(double *v) const { vst1q_f64(v, value); }
-#elif defined(__SSE2__)
+    double sum() const { return vaddvq_f64(value); }
+#elif defined(SLAM_SIMD_SSE2)
     __m128d value;
     Double2(double a, double b) : value(_mm_set_pd(b, a)) {}
     explicit Double2(__m128d v) : value(v) {}
+    static Double2 load(const double *v) { return Double2(_mm_loadu_pd(v)); }
     void store(double *v) const { _mm_storeu_pd(v, value); }
+    double sum() const { return _mm_cvtsd_f64(_mm_add_sd(value, _mm_unpackhi_pd(value, value))); }
+#elif defined(SLAM_SIMD_VECTOR_EXT)
+    typedef double Native __attribute__((vector_size(2 * sizeof(double))));
+    Native value;
+    Double2(double a, double b) : value(Native{a, b}) {}
+    explicit Double2(Native v) : value(v) {}
+    // memcpy keeps unaligned loads/stores well defined; compilers emit one vector move.
+    static Double2 load(const double *v) {
+        Native r;
+        std::memcpy(&r, v, sizeof r);
+        return Double2(r);
+    }
+    void store(double *v) const { std::memcpy(v, &value, sizeof value); }
+    double sum() const { return value[0] + value[1]; }
 #else
     std::array<double, 2> value;
     Double2(double a, double b) : value{a, b} {}
+    static Double2 load(const double *v) { return Double2(v[0], v[1]); }
+    double sum() const { return value[0] + value[1]; }
     void store(double *v) const {
         v[0] = value[0];
         v[1] = value[1];
@@ -76,42 +120,61 @@ struct Double2 {
     explicit Double2(double v) : Double2(v, v) {}
 };
 
-#define SLAM_BINARY_OP(OP, NEON, SSE)                                                                        \
-    inline Double2 operator OP(Double2 a, Double2 b) { return Double2(NEON(a.value, b.value)); }
-#if defined(__aarch64__)
-SLAM_BINARY_OP(+, vaddq_f64, _mm_add_pd)
-SLAM_BINARY_OP(-, vsubq_f64, _mm_sub_pd)
-SLAM_BINARY_OP(*, vmulq_f64, _mm_mul_pd)
-SLAM_BINARY_OP(/, vdivq_f64, _mm_div_pd)
-#elif defined(__SSE2__)
-#undef SLAM_BINARY_OP
-#define SLAM_BINARY_OP(OP, NEON, SSE)                                                                        \
-    inline Double2 operator OP(Double2 a, Double2 b) { return Double2(SSE(a.value, b.value)); }
-SLAM_BINARY_OP(+, vaddq_f64, _mm_add_pd)
-SLAM_BINARY_OP(-, vsubq_f64, _mm_sub_pd)
-SLAM_BINARY_OP(*, vmulq_f64, _mm_mul_pd)
-SLAM_BINARY_OP(/, vdivq_f64, _mm_div_pd)
+#if defined(SLAM_SIMD_NEON)
+inline Double2 operator+(Double2 a, Double2 b) { return Double2(vaddq_f64(a.value, b.value)); }
+inline Double2 operator-(Double2 a, Double2 b) { return Double2(vsubq_f64(a.value, b.value)); }
+inline Double2 operator*(Double2 a, Double2 b) { return Double2(vmulq_f64(a.value, b.value)); }
+inline Double2 operator/(Double2 a, Double2 b) { return Double2(vdivq_f64(a.value, b.value)); }
+#elif defined(SLAM_SIMD_SSE2)
+inline Double2 operator+(Double2 a, Double2 b) { return Double2(_mm_add_pd(a.value, b.value)); }
+inline Double2 operator-(Double2 a, Double2 b) { return Double2(_mm_sub_pd(a.value, b.value)); }
+inline Double2 operator*(Double2 a, Double2 b) { return Double2(_mm_mul_pd(a.value, b.value)); }
+inline Double2 operator/(Double2 a, Double2 b) { return Double2(_mm_div_pd(a.value, b.value)); }
+#elif defined(SLAM_SIMD_VECTOR_EXT)
+inline Double2 operator+(Double2 a, Double2 b) { return Double2(a.value + b.value); }
+inline Double2 operator-(Double2 a, Double2 b) { return Double2(a.value - b.value); }
+inline Double2 operator*(Double2 a, Double2 b) { return Double2(a.value * b.value); }
+inline Double2 operator/(Double2 a, Double2 b) { return Double2(a.value / b.value); }
 #else
-#undef SLAM_BINARY_OP
-#define SLAM_BINARY_OP(OP)                                                                                   \
-    inline Double2 operator OP(Double2 a, Double2 b) {                                                       \
-        return Double2(a.value[0] OP b.value[0], a.value[1] OP b.value[1]);                                  \
-    }
-SLAM_BINARY_OP(+)
-SLAM_BINARY_OP(-)
-SLAM_BINARY_OP(*)
-SLAM_BINARY_OP(/)
+inline Double2 operator+(Double2 a, Double2 b) { return Double2(a.value[0] + b.value[0], a.value[1] + b.value[1]); }
+inline Double2 operator-(Double2 a, Double2 b) { return Double2(a.value[0] - b.value[0], a.value[1] - b.value[1]); }
+inline Double2 operator*(Double2 a, Double2 b) { return Double2(a.value[0] * b.value[0], a.value[1] * b.value[1]); }
+inline Double2 operator/(Double2 a, Double2 b) { return Double2(a.value[0] / b.value[0], a.value[1] / b.value[1]); }
 #endif
-#undef SLAM_BINARY_OP
 inline Double2 operator-(Double2 a) { return Double2(0.0) - a; }
 
-inline void requireSimdSupport(ExecutionMode mode) {
-#if !defined(__aarch64__) && !defined(__SSE2__)
-    if (mode == ExecutionMode::SerialSimd)
-        throw std::runtime_error("serial_simd requires AArch64 NEON or SSE2");
+inline constexpr const char *simdBackend() {
+#if defined(SLAM_SIMD_NEON)
+    return "neon";
+#elif defined(SLAM_SIMD_SSE2)
+    return "sse2";
+#elif defined(SLAM_SIMD_VECTOR_EXT)
+    return "vector-extensions";
 #else
-    (void)mode;
+    return "scalar";
 #endif
+}
+
+// Contiguous, unaligned loads work with std::vector storage on every backend. Keep
+// separate multiply/add operations and handle the tail without reading past it.
+inline double innerProduct(std::span<const double> a, std::span<const double> b, ExecutionMode mode) {
+    assert(a.size() == b.size());
+    double sum = 0.0;
+    std::size_t i = 0;
+    if (mode == ExecutionMode::SerialSimd) {
+        Double2 first, second;
+        for (; i + 3 < a.size(); i += 4) {
+            first = first + Double2::load(a.data() + i) * Double2::load(b.data() + i);
+            second = second + Double2::load(a.data() + i + 2) * Double2::load(b.data() + i + 2);
+        }
+        if (i + 1 < a.size()) {
+            first = first + Double2::load(a.data() + i) * Double2::load(b.data() + i);
+            i += 2;
+        }
+        sum = (first + second).sum();
+    }
+    for (; i < a.size(); ++i) sum += a[i] * b[i];
+    return sum;
 }
 
 inline std::array<Double2, 3> transformPair(const Pose &a, const Pose &b, const Vec3 &x, const Vec3 &y) {
@@ -134,7 +197,7 @@ Matrix<R, C> multiply(const Matrix<R, K> &a, const Matrix<K, C> &b, ExecutionMod
         for (; c + 1 < C; c += 2) {
             Double2 v(0.0);
             for (std::size_t k = 0; k < K; ++k)
-                v = v + Double2(a(r, k)) * Double2(b(k, c), b(k, c + 1));
+                v = v + Double2(a(r, k)) * Double2::load(b.data.data() + k * C + c);
             v.store(&out.data[r * C + c]);
         }
         for (; c < C; ++c)

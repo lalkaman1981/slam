@@ -16,6 +16,17 @@ if(SLAM_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address,undefined)
 endif()
+# serial_simd backend. "auto" uses NEON or SSE2 intrinsics when available and portable
+# GCC/Clang vector extensions elsewhere; the other values force a backend for testing.
+set(SLAM_SIMD_BACKEND "auto" CACHE STRING "serial_simd backend: auto, portable or scalar")
+set_property(CACHE SLAM_SIMD_BACKEND PROPERTY STRINGS auto portable scalar)
+if(SLAM_SIMD_BACKEND STREQUAL "portable")
+    add_compile_definitions(SLAM_SIMD_FORCE_PORTABLE)
+elseif(SLAM_SIMD_BACKEND STREQUAL "scalar")
+    add_compile_definitions(SLAM_SIMD_FORCE_SCALAR)
+elseif(NOT SLAM_SIMD_BACKEND STREQUAL "auto")
+    message(FATAL_ERROR "SLAM_SIMD_BACKEND must be auto, portable or scalar")
+endif()
 
 add_library(slam_frontend
     ${SLAM_ROOT}/src/our/feature_extractor.cpp
@@ -47,9 +58,13 @@ target_link_libraries(slam_mapping_sequence PRIVATE slam_mapping)
 add_executable(slam_mapping_bench ${SLAM_ROOT}/bench/mapping_bench.cpp)
 target_link_libraries(slam_mapping_bench PRIVATE slam_mapping)
 
+# Lab3-style pipeline benchmarks (ours vs OpenCV), binaries in bench/compiled; see bench/BENCHMARK.md.
+add_subdirectory(${SLAM_ROOT}/bench ${CMAKE_BINARY_DIR}/pipeline_bench)
+
 include(CTest)
 if(BUILD_TESTING)
-    foreach(test IN ITEMS pose_estimation_tests mapping_adapter_tests mapping_modes_tests slam_pipeline_tests)
+    foreach(test IN ITEMS pose_estimation_tests mapping_adapter_tests mapping_modes_tests slam_pipeline_tests
+                          paper_map_tests paper_loop_tests)
         add_executable(slam_${test} ${SLAM_ROOT}/tests/${test}.cpp)
         target_link_libraries(slam_${test} PRIVATE slam_pipeline)
         add_test(NAME ${test} COMMAND slam_${test})
